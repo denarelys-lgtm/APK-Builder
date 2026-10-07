@@ -50,7 +50,24 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: 7. Compilar
+      - name: 7. Corregir atributos en vectores
+        shell: bash
+        run: |
+          set -e
+          echo "Reemplazando referencias a colores en archivos de vectores..."
+          find project/app/src/main/res/drawable/ -name "*.xml" -exec sed -i \
+            -e 's/?attr\/colorPrimary/#6200EE/g' \
+            -e 's/?attr\/colorPrimaryDark/#3700B3/g' \
+            -e 's/?attr\/colorSecondary/#03DAC6/g' \
+            -e 's/?attr\/colorTertiary/#018786/g' \
+            -e 's/?attr\/diamondIconColor/#FFD700/g' \
+            -e 's/?attr\/colorStroke/#000000/g' \
+            -e 's/?attr\/label_tertiary_active/#FF0000/g' \
+            -e 's/?attr\/backgrounds_secondary_active/#CCCCCC/g' \
+            {} +
+          echo "Corrección completada."
+
+      - name: 8. Compilar
         shell: bash
         run: |
           set -o pipefail
@@ -59,7 +76,7 @@ jobs:
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ../build.log
 
-      - name: 8. Subir log
+      - name: 9. Subir log
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -67,7 +84,7 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
-      - name: 9. Subir APK (si compiló)
+      - name: 10. Subir APK (si compiló)
         if: success()
         uses: actions/upload-artifact@v4
         with:
