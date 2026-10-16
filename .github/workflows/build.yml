@@ -50,6 +50,63 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
+      # PASO 6.5 — CONVERTIR TODOS LOS XML A UTF-8 (causa raíz)
+      # ============================================================
+      - name: 6.5. Convertir todos los XML a UTF-8
+        shell: bash
+        run: |
+          set -e
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 6.5: UTF-8 NORMALIZATION =====" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
+          import os, codecs
+          RES = "project/app/src/main/res"
+
+          def read_any(path):
+              with open(path, "rb") as f:
+                  raw = f.read()
+              if raw.startswith(codecs.BOM_UTF8):
+                  return raw[3:].decode("utf-8"), "utf-8-bom"
+              if raw.startswith(codecs.BOM_UTF16_LE):
+                  return raw.decode("utf-16-le"), "utf-16-le"
+              if raw.startswith(codecs.BOM_UTF16_BE):
+                  return raw.decode("utf-16-be"), "utf-16-be"
+              # Sin BOM: heurística
+              # Si hay muchos \x00 intercalados, es UTF-16
+              nulls = raw[:200].count(b"\x00")
+              if nulls > 20:
+                  # probar LE vs BE
+                  try:
+                      text = raw.decode("utf-16-le")
+                      if text.count("\x00") > 5:
+                          text = raw.decode("utf-16-be")
+                  except UnicodeDecodeError:
+                      text = raw.decode("utf-16-le", errors="replace")
+                  return text, "utf-16-heuristic"
+              try:
+                  return raw.decode("utf-8"), "utf-8"
+              except UnicodeDecodeError:
+                  return raw.decode("latin-1"), "latin-1"
+
+          converted = 0
+          for root, _, files in os.walk(RES):
+              for fn in files:
+                  if not fn.lower().endswith(".xml"): continue
+                  path = os.path.join(root, fn)
+                  try:
+                      text, enc = read_any(path)
+                  except Exception as e:
+                      print(f"[ERR] {path}: {e}")
+                      continue
+                  if enc != "utf-8":
+                      print(f"[UTF8] {path}  ({enc} -> utf-8)")
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write(text)
+                      converted += 1
+          print(f"Convertidos a UTF-8: {converted}")
+          PYEOF
+
+      # ============================================================
       # PASO 7 — VECTORES
       # ============================================================
       - name: 7. Corregir vectores
@@ -102,13 +159,12 @@ jobs:
                       if src != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(src)
-                          print(f"[VECTOR] {path}")
                           fixed += 1
           print(f"Vectores corregidos: {fixed}")
           PYEOF
 
       # ============================================================
-      # PASO 7.2 — STRINGS/PLURALS (state machine correcta + regex ampliada)
+      # PASO 7.2 — STRINGS/PLURALS (state machine + arrays/plurals)
       # ============================================================
       - name: 7.2. Corregir strings y plurals
         shell: bash
@@ -121,7 +177,6 @@ jobs:
           RES = "project/app/src/main/res"
 
           def fix_gt_sequences(text):
-              """Escapa ]]> SOLO cuando NO cierra una CDATA."""
               out = []
               i = 0
               n = len(text)
@@ -158,10 +213,16 @@ jobs:
               return RE_ITEM.sub(fix_item, block)
 
           fixed = 0
+          scanned = 0
           for root, _, files in os.walk(RES):
+              # Solo procesar carpetas values*/
+              parent = os.path.basename(root)
+              if not parent.startswith("values"):
+                  continue
               for fn in files:
                   if not fn.lower().endswith(".xml"): continue
                   path = os.path.join(root, fn)
+                  scanned += 1
                   with open(path, "r", encoding="utf-8", errors="replace") as f:
                       src = f.read()
                   orig = src
@@ -172,65 +233,69 @@ jobs:
                           f.write(src)
                       print(f"[STRINGS] {path}")
                       fixed += 1
+          print(f"Archivos values* escaneados: {scanned}")
           print(f"Strings/plurals corregidos: {fixed}")
           PYEOF
 
       # ============================================================
-      # PASO 7.3 — ELIMINAR .9.png CORRUPTOS (decompilados desde APK)
+      # PASO 7.3 — ELIMINAR .9.png
       # ============================================================
       - name: 7.3. Eliminar .9.png corruptos
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.3: DELETE 9.PNG =====" | tee -a "$LOG"
-          echo "--- .9.png encontrados ---" | tee -a "$LOG"
-          find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | tee -a "$LOG" || true
-          echo "--- eliminando todos ---" | tee -a "$LOG"
           find project/app/src/main/res -name "*.9.png" -type f -print -delete 2>&1 | tee -a "$LOG" || true
-          echo "--- restantes ---" | tee -a "$LOG"
-          find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | tee -a "$LOG" || echo "(ninguno)" | tee -a "$LOG"
+          REMAIN=$(find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | wc -l)
+          echo "Restantes: $REMAIN" | tee -a "$LOG"
 
       # ============================================================
-      # PASO 7.4 — Verificación
+      # PASO 7.4 — Verificación CORREGIDA (solo archivos values*/strings.xml)
       # ============================================================
-      - name: 7.4. Verificar recursos
+      - name: 7.4. Verificar valores
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.4: VERIFICACIÓN =====" | tee -a "$LOG"
 
-          echo "--- ]]> residuales en XML ---" | tee -a "$LOG"
+          echo "--- ]]> en values*/strings.xml ---" | tee -a "$LOG"
           FOUND=0
           while IFS= read -r -d '' f; do
             if grep -q ']]>' "$f" 2>/dev/null; then
-              echo "  $f" | tee -a "$LOG"
-              grep -n ']]>' "$f" | head -3 | tee -a "$LOG"
-              FOUND=1
+              echo "  $f" | tee -a "$LOG"; FOUND=1
             fi
-          done < <(find project/app/src/main/res -type f -iname "*.xml" -print0)
-          [ "$FOUND" -eq 0 ] && echo "  OK (ningún ]]> residual)" | tee -a "$LOG"
+          done < <(find project/app/src/main/res -type f -path "*/values*/*.xml" -print0)
+          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
 
-          echo "--- <item> sin quantity ---" | tee -a "$LOG"
+          echo "--- <plurals> con <item> sin quantity ---" | tee -a "$LOG"
           FOUND=0
           while IFS= read -r -d '' f; do
-            if grep -q '<item>' "$f" 2>/dev/null; then
-              echo "  $f" | tee -a "$LOG"
-              grep -n '<item>' "$f" | head -3 | tee -a "$LOG"
-              FOUND=1
+            # Busca bloques plurals y verifica items
+            if python3 -c "
+          import sys, re
+          src = open('$f', encoding='utf-8', errors='replace').read()
+          for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
+              for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
+                  attrs = im.group(1) or ''
+                  if 'quantity' not in attrs:
+                      sys.exit(1)
+          sys.exit(0)
+          " 2>/dev/null; then :; else
+              echo "  $f" | tee -a "$LOG"; FOUND=1
             fi
-          done < <(find project/app/src/main/res -type f -iname "*.xml" -print0)
-          [ "$FOUND" -eq 0 ] && echo "  OK (ningún <item> bare)" | tee -a "$LOG"
+          done < <(find project/app/src/main/res -type f -path "*/values*/*.xml" -print0)
+          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
 
-          echo "--- Referencias simbólicas en vectores ---" | tee -a "$LOG"
+          echo "--- Vectores con referencias simbólicas ---" | tee -a "$LOG"
           FOUND=0
           while IFS= read -r -d '' f; do
             if grep -qE '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' "$f" 2>/dev/null; then
               echo "  $f" | tee -a "$LOG"; FOUND=1
             fi
-          done < <(find project/app/src/main/res -type f -iname "*.xml" -path "*/drawable*" -print0)
+          done < <(find project/app/src/main/res -type f -path "*/drawable*/*.xml" -print0)
           [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
 
-      - name: 7.5. Forzar configuración de Gradle y Plugins
+      - name: 7.5. Configurar Gradle y Plugins
         shell: bash
         run: |
           set -e
@@ -267,12 +332,11 @@ jobs:
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.7: DIAGNÓSTICO =====" | tee -a "$LOG"
+          echo "===== STEP 7.7 =====" | tee -a "$LOG"
           echo "Archivos en res/: $(find project/app/src/main/res -type f | wc -l)" | tee -a "$LOG"
-          echo "Peso de res/: $(du -sh project/app/src/main/res | cut -f1)" | tee -a "$LOG"
-          head -30 project/app/build.gradle 2>/dev/null | tee -a "$LOG" || true
+          echo "Peso res/: $(du -sh project/app/src/main/res | cut -f1)" | tee -a "$LOG"
 
-      - name: 7.9. Configurar memoria de Gradle
+      - name: 7.9. Memoria de Gradle
         shell: bash
         run: |
           set -e
@@ -290,6 +354,9 @@ jobs:
           EOF
           cd ..
 
+      # ============================================================
+      # PASO 8 — COMPILAR (con diagnóstico automático si falla)
+      # ============================================================
       - name: 8. Compilar
         shell: bash
         run: |
@@ -300,7 +367,33 @@ jobs:
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
+          set +e
           "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee -a "$LOG"
+          RC=${PIPESTATUS[0]}
+
+          if [ "$RC" -ne 0 ]; then
+            echo "" | tee -a "$LOG"
+            echo "===== DIAGNÓSTICO POST-FALLO =====" | tee -a "$LOG"
+
+            VALUES="$GITHUB_WORKSPACE/project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values/values.xml"
+            VALUES_HI="$GITHUB_WORKSPACE/project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values-hi/values-hi.xml"
+
+            if [ -f "$VALUES" ]; then
+              echo "--- values.xml línea 12747 ±10 (¿qué hay ahí?) ---" | tee -a "$LOG"
+              sed -n '12737,12757p' "$VALUES" | cat -A | tee -a "$LOG"
+              echo "--- Buscando ]]> en values.xml merged ---" | tee -a "$LOG"
+              grep -n ']]>' "$VALUES" | head -20 | tee -a "$LOG" || true
+            else
+              echo "(values.xml merged no existe)" | tee -a "$LOG"
+            fi
+
+            if [ -f "$VALUES_HI" ]; then
+              echo "--- Buscando <plurals> sin quantity en values-hi.xml ---" | tee -a "$LOG"
+              grep -n 'plurals\|<item' "$VALUES_HI" | head -40 | tee -a "$LOG" || true
+            fi
+          fi
+
+          exit $RC
 
       - name: 9. Subir log
         if: always()
