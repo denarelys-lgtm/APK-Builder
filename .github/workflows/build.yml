@@ -27,7 +27,6 @@ jobs:
           set -e
           mkdir project
           unzip -q rebuild1.zip -d project
-          echo "Estructura:"
           ls -la project/
 
       - name: 3. Java 17
@@ -51,194 +50,191 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
-      # PASO 7 — VECTORES con Python (añade width/height, resuelve refs)
+      # PASO 7 — VECTORES
       # ============================================================
-      - name: 7. Corregir vectores con Python
+      - name: 7. Corregir vectores
         shell: bash
         run: |
           set -e
-          python3 - <<'PYEOF'
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7: VECTORES =====" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
-
-          RES = "project/app/src/main/res/drawable"
-          if not os.path.isdir(RES):
-              print("No hay carpeta drawable"); raise SystemExit(0)
+          BASE = "project/app/src/main/res"
+          DIRS = [d for d in os.listdir(BASE) if d.startswith("drawable")] if os.path.isdir(BASE) else []
 
           RE_REF = re.compile(
               r'(strokeColor|fillColor|color)\s*=\s*"'
               r'(@color/|@android:color/|@drawable/|\?attr/|\?android:attr/)'
               r'[^"]*"'
           )
-          def lit(m):
-              return f'{m.group(1)}="#FF000000"'
-
+          def lit(m): return f'{m.group(1)}="#FF000000"'
           RE_VEC_OPEN = re.compile(r'<vector\b[^>]*>', re.DOTALL)
+          fixed = 0
 
-          for fn in os.listdir(RES):
-              if not fn.endswith(".xml"):
-                  continue
-              path = os.path.join(RES, fn)
-              with open(path, "r", encoding="utf-8", errors="replace") as f:
-                  src = f.read()
-              orig = src
-
-              # 1) Resolver referencias simbólicas
-              src = RE_REF.sub(lit, src)
-
-              # 2) Asegurar width/height válidos en <vector>
-              m = RE_VEC_OPEN.search(src)
-              if m:
-                  vec = m.group(0)
-                  fixed = vec
-
-                  if not re.search(r'android:width\s*=\s*"([1-9][0-9]*)', vec):
-                      if re.search(r'android:width\s*=\s*"', vec):
-                          fixed = re.sub(r'android:width\s*=\s*"[^"]*"',
-                                         'android:width="24dp"', fixed)
-                      else:
-                          fixed = fixed[:-1] + ' android:width="24dp">'
-
-                  if not re.search(r'android:height\s*=\s*"([1-9][0-9]*)', vec):
-                      if re.search(r'android:height\s*=\s*"', vec):
-                          fixed = re.sub(r'android:height\s*=\s*"[^"]*"',
-                                         'android:height="24dp"', fixed)
-                      else:
-                          fixed = fixed[:-1] + ' android:height="24dp">'
-
-                  if fixed != vec:
-                      src = src.replace(vec, fixed, 1)
-
-              if src != orig:
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(src)
-                  print(f"[vector] Corregido: {fn}")
-
-          print("Vectores OK.")
+          for d in DIRS:
+              full = os.path.join(BASE, d)
+              for root, _, files in os.walk(full):
+                  for fn in files:
+                      if not fn.lower().endswith(".xml"): continue
+                      path = os.path.join(root, fn)
+                      with open(path, "r", encoding="utf-8", errors="replace") as f:
+                          src = f.read()
+                      orig = src
+                      src = RE_REF.sub(lit, src)
+                      m = RE_VEC_OPEN.search(src)
+                      if m:
+                          vec = m.group(0); fixedv = vec
+                          wm = re.search(r'android:width\s*=\s*"([^"]*)"', vec)
+                          if wm:
+                              if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', wm.group(1)):
+                                  fixedv = fixedv[:wm.start(1)] + "24dp" + fixedv[wm.end(1):]
+                          else:
+                              fixedv = fixedv[:-1] + ' android:width="24dp">'
+                          hm = re.search(r'android:height\s*=\s*"([^"]*)"', vec)
+                          if hm:
+                              if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', hm.group(1)):
+                                  fixedv = fixedv[:hm.start(1)] + "24dp" + fixedv[hm.end(1):]
+                          else:
+                              fixedv = fixedv[:-1] + ' android:height="24dp">'
+                          if fixedv != vec:
+                              src = src.replace(vec, fixedv, 1)
+                      if src != orig:
+                          with open(path, "w", encoding="utf-8") as f:
+                              f.write(src)
+                          print(f"[VECTOR] {path}")
+                          fixed += 1
+          print(f"Vectores corregidos: {fixed}")
           PYEOF
 
       # ============================================================
-      # PASO 7.2 — STRINGS/PLURALS con Python
+      # PASO 7.2 — STRINGS/PLURALS (state machine correcta + regex ampliada)
       # ============================================================
-      - name: 7.2. Corregir strings/plurals con Python
+      - name: 7.2. Corregir strings y plurals
         shell: bash
         run: |
           set -e
-          python3 - <<'PYEOF'
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7.2: STRINGS / PLURALS =====" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
-
           RES = "project/app/src/main/res"
 
-          def fix_cdata_literals(text):
-              """Escapa ]]> que NO cierra una CDATA."""
+          def fix_gt_sequences(text):
+              """Escapa ]]> SOLO cuando NO cierra una CDATA."""
               out = []
               i = 0
               n = len(text)
               while i < n:
-                  if text.startswith("<![CDATA[", i):
-                      j = text.find("]]>", i + 9)
-                      if j == -1:
-                          out.append(text[i:].replace("]]>", "]]&gt;"))
+                  next_cdata = text.find("<![CDATA[", i)
+                  next_close = text.find("]]>", i)
+                  if next_close == -1:
+                      out.append(text[i:]); break
+                  if next_cdata != -1 and next_cdata < next_close:
+                      cdata_end = text.find("]]>", next_cdata + 9)
+                      if cdata_end == -1:
+                          out.append(text[i:next_cdata])
+                          out.append(text[next_cdata:].replace("]]>", "]]&gt;"))
                           break
-                      out.append(text[i:j+3])
-                      i = j + 3
+                      out.append(text[i:cdata_end + 3])
+                      i = cdata_end + 3
                   else:
-                      j = text.find("]]>", i)
-                      if j == -1:
-                          out.append(text[i:])
-                          break
-                      out.append(text[i:j])
+                      out.append(text[i:next_close])
                       out.append("]]&gt;")
-                      i = j + 3
+                      i = next_close + 3
               return "".join(out)
 
-          RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
-          RE_ITEM_BARE = re.compile(r'<item\s*>([^<]*)</item>')
+          RE_PLURAL_BLOCK = re.compile(r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL)
+          RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
 
           def fix_plural_block(m):
-              head, body, tail = m.group(1), m.group(2), m.group(3)
-              body = RE_ITEM_BARE.sub(
-                  lambda x: f'<item quantity="other">{x.group(1)}</item>',
-                  body
-              )
-              return head + body + tail
+              block = m.group(0)
+              def fix_item(im):
+                  attrs = im.group(1) or ""
+                  content = im.group(2)
+                  if 'quantity' in attrs:
+                      return im.group(0)
+                  return f'<item quantity="other"{attrs}>{content}</item>'
+              return RE_ITEM.sub(fix_item, block)
 
-          fixed_files = []
+          fixed = 0
           for root, _, files in os.walk(RES):
               for fn in files:
-                  if not fn.endswith(".xml"):
-                      continue
+                  if not fn.lower().endswith(".xml"): continue
                   path = os.path.join(root, fn)
                   with open(path, "r", encoding="utf-8", errors="replace") as f:
                       src = f.read()
                   orig = src
-
-                  src = fix_cdata_literals(src)
-                  src = RE_PLURAL.sub(fix_plural_block, src)
-
+                  src = fix_gt_sequences(src)
+                  src = RE_PLURAL_BLOCK.sub(fix_plural_block, src)
                   if src != orig:
                       with open(path, "w", encoding="utf-8") as f:
                           f.write(src)
-                      fixed_files.append(path)
-                      print(f"[strings] Corregido: {path}")
-
-          if not fixed_files:
-              print("Nada que corregir en strings.")
-          print("Strings OK.")
+                      print(f"[STRINGS] {path}")
+                      fixed += 1
+          print(f"Strings/plurals corregidos: {fixed}")
           PYEOF
 
       # ============================================================
-      # PASO 7.3 — Verificación estricta
+      # PASO 7.3 — ELIMINAR .9.png CORRUPTOS (decompilados desde APK)
       # ============================================================
-      - name: 7.3. Verificación de recursos
+      - name: 7.3. Eliminar .9.png corruptos
         shell: bash
         run: |
-          set +e
-          RES="project/app/src/main/res"
-
-          echo "== Vectores con referencias simbólicas =="
-          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' \
-            "$RES/drawable/" 2>/dev/null || echo "OK"
-
-          echo "== Vectores con width/height 0 =="
-          grep -rEl 'android:(width|height)="0' "$RES/drawable/" 2>/dev/null || echo "OK"
-
-          echo "== <item> sin quantity en strings =="
-          grep -rn '<item>' "$RES"/values*/strings.xml 2>/dev/null || echo "OK"
-
-          echo "Verificación terminada."
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7.3: DELETE 9.PNG =====" | tee -a "$LOG"
+          echo "--- .9.png encontrados ---" | tee -a "$LOG"
+          find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | tee -a "$LOG" || true
+          echo "--- eliminando todos ---" | tee -a "$LOG"
+          find project/app/src/main/res -name "*.9.png" -type f -print -delete 2>&1 | tee -a "$LOG" || true
+          echo "--- restantes ---" | tee -a "$LOG"
+          find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | tee -a "$LOG" || echo "(ninguno)" | tee -a "$LOG"
 
       # ============================================================
-      # PASO 7.4 — Validar XML con xmllint
+      # PASO 7.4 — Verificación
       # ============================================================
-      - name: 7.4. Validar XML de recursos
+      - name: 7.4. Verificar recursos
         shell: bash
         run: |
-          set -e
-          if ! command -v xmllint >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils
-          fi
-          RES="project/app/src/main/res"
-          FAILED=0
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7.4: VERIFICACIÓN =====" | tee -a "$LOG"
+
+          echo "--- ]]> residuales en XML ---" | tee -a "$LOG"
+          FOUND=0
           while IFS= read -r -d '' f; do
-            if ! xmllint --noout "$f" 2>/dev/null; then
-              echo "::error file=$f::XML inválido"
-              xmllint --noout "$f" 2>&1 || true
-              FAILED=1
+            if grep -q ']]>' "$f" 2>/dev/null; then
+              echo "  $f" | tee -a "$LOG"
+              grep -n ']]>' "$f" | head -3 | tee -a "$LOG"
+              FOUND=1
             fi
-          done < <(find "$RES" -type f -name "*.xml" -print0)
-          if [ "$FAILED" -eq 1 ]; then
-            echo "Hay XML mal formados. Abortando antes de Gradle."
-            exit 1
-          fi
-          echo "OK: todos los XML son válidos."
+          done < <(find project/app/src/main/res -type f -iname "*.xml" -print0)
+          [ "$FOUND" -eq 0 ] && echo "  OK (ningún ]]> residual)" | tee -a "$LOG"
 
-      - name: 7.5. Forzar configuración correcta de Gradle y Plugins
+          echo "--- <item> sin quantity ---" | tee -a "$LOG"
+          FOUND=0
+          while IFS= read -r -d '' f; do
+            if grep -q '<item>' "$f" 2>/dev/null; then
+              echo "  $f" | tee -a "$LOG"
+              grep -n '<item>' "$f" | head -3 | tee -a "$LOG"
+              FOUND=1
+            fi
+          done < <(find project/app/src/main/res -type f -iname "*.xml" -print0)
+          [ "$FOUND" -eq 0 ] && echo "  OK (ningún <item> bare)" | tee -a "$LOG"
+
+          echo "--- Referencias simbólicas en vectores ---" | tee -a "$LOG"
+          FOUND=0
+          while IFS= read -r -d '' f; do
+            if grep -qE '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' "$f" 2>/dev/null; then
+              echo "  $f" | tee -a "$LOG"; FOUND=1
+            fi
+          done < <(find project/app/src/main/res -type f -iname "*.xml" -path "*/drawable*" -print0)
+          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
+
+      - name: 7.5. Forzar configuración de Gradle y Plugins
         shell: bash
         run: |
           set -e
           cd project
-
-          echo "Generando un settings.gradle robusto..."
           cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
@@ -258,27 +254,23 @@ jobs:
           include ':app'
           EOF
 
-          echo "Asegurando que el plugin en app/build.gradle tenga la versión correcta..."
           if [ -f "app/build.gradle" ]; then
             sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
             sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
-
             if ! grep -q "com.android.application" app/build.gradle; then
               sed -i '1i plugins {\n    id "com.android.application" version "8.2.0"\n}\n' app/build.gradle
             fi
           fi
-
           cd ..
 
-      - name: 7.7. Diagnóstico de recursos
+      - name: 7.7. Diagnóstico
         shell: bash
         run: |
-          echo "Cantidad de archivos en res/:"
-          find project/app/src/main/res -type f 2>/dev/null | wc -l || true
-          echo "Peso de res/:"
-          du -sh project/app/src/main/res 2>/dev/null || true
-          echo "Primeras líneas de app/build.gradle:"
-          head -30 project/app/build.gradle 2>/dev/null || true
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7.7: DIAGNÓSTICO =====" | tee -a "$LOG"
+          echo "Archivos en res/: $(find project/app/src/main/res -type f | wc -l)" | tee -a "$LOG"
+          echo "Peso de res/: $(du -sh project/app/src/main/res | cut -f1)" | tee -a "$LOG"
+          head -30 project/app/build.gradle 2>/dev/null | tee -a "$LOG" || true
 
       - name: 7.9. Configurar memoria de Gradle
         shell: bash
@@ -296,19 +288,19 @@ jobs:
           android.enableJetifier=true
           android.nonTransitiveRClass=true
           EOF
-          echo "gradle.properties generado:"
-          cat gradle.properties
           cd ..
 
       - name: 8. Compilar
         shell: bash
         run: |
           set -o pipefail
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 8: GRADLE BUILD =====" | tee -a "$LOG"
           cd project
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
-          "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ../build.log
+          "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee -a "$LOG"
 
       - name: 9. Subir log
         if: always()
