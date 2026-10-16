@@ -75,7 +75,7 @@ jobs:
           set -e
           cd project
           
-          echo "Generando un settings.gradle limpio con soporte para plugins de Android..."
+          echo "Generando un settings.gradle limpio..."
           cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
@@ -95,14 +95,13 @@ jobs:
           include ':app'
           EOF
 
-          echo "Verificando build.gradle a nivel de raíz..."
-          if [ ! -f "build.gradle" ]; then
-            cat << 'EOF' > build.gradle
-          // Archivo build.gradle raíz generado automáticamente
-          plugins {
-              id 'com.android.application' version '8.2.0' apply false
-          }
-          EOF
+          echo "Asegurando el bloque plugins en app/build.gradle con versión..."
+          if [ -f "app/build.gradle" ]; then
+            # Si el archivo usa 'id "com.android.application"', le agregamos la versión si no la tiene
+            if grep -q "com.android.application" app/build.gradle && ! grep -q "version" app/build.gradle; then
+              sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
+              sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
+            fi
           fi
           
           cd ..
