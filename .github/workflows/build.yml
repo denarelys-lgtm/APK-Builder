@@ -50,9 +50,7 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
-      # PASO 6.5 — NORMALIZAR ENCODING
-      # ============================================================
-      - name: 6.5. Normalizar encoding de XML
+      - name: 6.5. Normalizar encoding
         shell: bash
         run: |
           set -e
@@ -68,28 +66,18 @@ jobs:
               *)
                 if iconv -f "$ENC" -t UTF-8 "$f" -o "$f.tmp" 2>/dev/null; then
                   mv "$f.tmp" "$f"; COUNT=$((COUNT+1))
-                else
-                  rm -f "$f.tmp"
-                  if iconv -f UTF-16 -t UTF-8 "$f" -o "$f.tmp" 2>/dev/null; then
-                    mv "$f.tmp" "$f"; COUNT=$((COUNT+1))
-                  else
-                    rm -f "$f.tmp"
-                  fi
-                fi
-                ;;
+                else rm -f "$f.tmp"; fi ;;
             esac
           done < <(find "$RES" -type f -name "*.xml" -print0)
           echo "Convertidos: $COUNT" | tee -a "$LOG"
 
-      # ============================================================
-      # PASO 7 — VECTORES
       # ============================================================
       - name: 7. Corregir vectores
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7: VECTORES =====" | tee -a "$LOG"
+          echo "===== STEP 7 =====" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
           BASE = "project/app/src/main/res"
@@ -103,51 +91,40 @@ jobs:
           RE_VEC_OPEN = re.compile(r'<vector\b[^>]*>', re.DOTALL)
           fixed = 0
           for d in DIRS:
-              full = os.path.join(BASE, d)
-              for root, _, files in os.walk(full):
+              for root, _, files in os.walk(os.path.join(BASE, d)):
                   for fn in files:
                       if not fn.lower().endswith(".xml"): continue
                       p = os.path.join(root, fn)
-                      with open(p, "r", encoding="utf-8", errors="replace") as f:
-                          src = f.read()
+                      src = open(p, encoding="utf-8", errors="replace").read()
                       orig = src
                       src = RE_REF.sub(lit, src)
                       m = RE_VEC_OPEN.search(src)
                       if m:
-                          vec = m.group(0); fixedv = vec
+                          vec = m.group(0); fv = vec
                           wm = re.search(r'android:width\s*=\s*"([^"]*)"', vec)
                           if wm:
                               if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', wm.group(1)):
-                                  fixedv = fixedv[:wm.start(1)] + "24dp" + fixedv[wm.end(1):]
-                          else:
-                              fixedv = fixedv[:-1] + ' android:width="24dp">'
+                                  fv = fv[:wm.start(1)] + "24dp" + fv[wm.end(1):]
+                          else: fv = fv[:-1] + ' android:width="24dp">'
                           hm = re.search(r'android:height\s*=\s*"([^"]*)"', vec)
                           if hm:
                               if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', hm.group(1)):
-                                  fixedv = fixedv[:hm.start(1)] + "24dp" + fixedv[hm.end(1):]
-                          else:
-                              fixedv = fixedv[:-1] + ' android:height="24dp">'
-                          if fixedv != vec:
-                              src = src.replace(vec, fixedv, 1)
+                                  fv = fv[:hm.start(1)] + "24dp" + fv[hm.end(1):]
+                          else: fv = fv[:-1] + ' android:height="24dp">'
+                          if fv != vec: src = src.replace(vec, fv, 1)
                       if src != orig:
-                          with open(p, "w", encoding="utf-8") as f:
-                              f.write(src)
+                          open(p, "w", encoding="utf-8").write(src)
                           fixed += 1
           print(f"Vectores corregidos: {fixed}")
           PYEOF
 
-      # ============================================================
-      # PASO 7.2 — STRINGS / PLURALS: FIX AGRESIVO
-      # - Elimina ]]> y ]]&gt; (AAPT2 bug con plurals)
-      # - Corrige <item> sin quantity en <plurals>
-      # - Elimina el plural custom_gifts_guidelines_info_monthly_limit
       # ============================================================
       - name: 7.2. Corregir strings y plurals
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.2: FIX AGRESIVO =====" | tee -a "$LOG"
+          echo "===== STEP 7.2 =====" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
           RES = "project/app/src/main/res"
@@ -158,21 +135,20 @@ jobs:
               re.DOTALL
           )
           RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
+          RE_ITEM_SELF = re.compile(r'<item(\s[^>]*)?/>', re.DOTALL)
 
-          stats = {'gt': 0, 'pl': 0, 'del': 0}
+          stats = {'gt': 0, 'pl_pair': 0, 'pl_self': 0, 'del': 0}
 
           for root, _, files in os.walk(RES):
               if not os.path.basename(root).startswith("values"): continue
               for fn in files:
                   if not fn.lower().endswith(".xml"): continue
                   p = os.path.join(root, fn)
-                  try:
-                      src = open(p, encoding="utf-8", errors="replace").read()
-                  except Exception as e:
-                      print(f"[ERR] {p}: {e}"); continue
+                  try: src = open(p, encoding="utf-8", errors="replace").read()
+                  except: continue
                   orig = src
 
-                  # 1) Eliminar secuencias ]]> (literal y escapada)
+                  # 1) Eliminar ]]> y ]]&gt;
                   if ']]>' in src:
                       src = src.replace(']]>', '')
                       stats['gt'] += 1
@@ -180,7 +156,7 @@ jobs:
                       src = src.replace(']]&gt;', '')
                       stats['gt'] += 1
 
-                  # 2) Eliminar bloque <plurals> con el nombre problemático
+                  # 2) Eliminar el plural problemático concreto
                   if 'custom_gifts_guidelines_info_monthly_limit' in src:
                       new = RE_PLURAL_NAMED.sub('', src)
                       if new != src:
@@ -188,44 +164,37 @@ jobs:
                           src = new
                           stats['del'] += 1
 
-                  # 3) Corregir <item> sin quantity dentro de <plurals>
-                  def repl_plural(m):
-                      head, body, tail = m.group(1), m.group(2), m.group(3)
-                      def fx(im):
-                          attrs = im.group(1) or ""
-                          if 'quantity' in attrs: return im.group(0)
-                          return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
-                      return head + RE_ITEM.sub(fx, body) + tail
-                  # Nota: usamos RE_PLURAL_BLOCK sin captura por compatibilidad
+                  # 3) Fix items en plurals (pair + self-closing)
                   def repl_block(m):
                       block = m.group(0)
-                      head_end = block.find('>') + 1
-                      tail_start = block.rfind('</plurals>')
-                      if head_end <= 0 or tail_start <= 0: return block
-                      head = block[:head_end]
-                      body = block[head_end:tail_start]
-                      tail = block[tail_start:]
-                      def fx(im):
-                          attrs = im.group(1) or ""
+                      he = block.find('>') + 1
+                      ts = block.rfind('</plurals>')
+                      if he <= 0 or ts <= 0: return block
+                      head, body, tail = block[:he], block[he:ts], block[ts:]
+                      def fx_self(im):
+                          attrs = im.group(1) or ''
                           if 'quantity' in attrs: return im.group(0)
+                          stats['pl_self'] += 1
+                          return f'<item quantity="other"{attrs}/>'
+                      def fx_pair(im):
+                          attrs = im.group(1) or ''
+                          if 'quantity' in attrs: return im.group(0)
+                          stats['pl_pair'] += 1
                           return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
-                      return head + RE_ITEM.sub(fx, body) + tail
-                  new = RE_PLURAL_BLOCK.sub(repl_block, src)
-                  if new != src:
-                      stats['pl'] += 1
-                      src = new
+                      body = RE_ITEM_SELF.sub(fx_self, body)
+                      body = RE_ITEM.sub(fx_pair, body)
+                      return head + body + tail
+                  src = RE_PLURAL_BLOCK.sub(repl_block, src)
 
                   if src != orig:
                       open(p, "w", encoding="utf-8").write(src)
 
           print(f"]]> eliminados: {stats['gt']}")
-          print(f"<item> sin quantity corregidos: {stats['pl']}")
+          print(f"<item>...</item> corregidos: {stats['pl_pair']}")
+          print(f"<item/> self-closing corregidos: {stats['pl_self']}")
           print(f"<plurals> problemáticos eliminados: {stats['del']}")
           PYEOF
 
-      # ============================================================
-      # PASO 7.3 — ELIMINAR .9.png
-      # ============================================================
       - name: 7.3. Eliminar .9.png corruptos
         shell: bash
         run: |
@@ -234,10 +203,7 @@ jobs:
           find project/app/src/main/res -name "*.9.png" -type f -delete 2>&1 | tee -a "$LOG" || true
           echo "Restantes: $(find project/app/src/main/res -name '*.9.png' -type f 2>/dev/null | wc -l)" | tee -a "$LOG"
 
-      # ============================================================
-      # PASO 7.4 — VERIFICACIÓN (busca también ]]&gt;)
-      # ============================================================
-      - name: 7.4. Verificación estricta
+      - name: 7.4. Verificación source
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
@@ -252,10 +218,9 @@ jobs:
                   if not fn.lower().endswith(".xml"): continue
                   p = os.path.join(root, fn)
                   src = open(p, encoding="utf-8", errors="replace").read()
-                  if ']]>' in src or ']]&gt;' in src:
-                      gt.append(p)
+                  if ']]>' in src or ']]&gt;' in src: gt.append(p)
                   for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
-                      for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
+                      for im in re.finditer(r'<item(\s[^>]*)?/?>', m.group(1)):
                           if 'quantity' not in (im.group(1) or ''):
                               pl.append((p, im.group(0)[:80]))
           print(f"]]> / ]]&gt; en source: {len(gt)}")
@@ -324,17 +289,128 @@ jobs:
           EOF
           cd ..
 
-      - name: 8. Compilar
+      # ============================================================
+      # PASO 8 — PRE-BUILD para poblar cache
+      # ============================================================
+      - name: 8.1. Pre-build para poblar cache de AARs
         shell: bash
         run: |
-          set -o pipefail
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 8: GRADLE BUILD =====" | tee -a "$LOG"
+          echo "===== STEP 8.1: PRE-BUILD =====" | tee -a "$LOG"
           cd project
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
+          set +e
+          "$G" --no-daemon --stacktrace :app:mergeDebugResources 2>&1 | tail -30 | tee -a "$LOG"
+          set -e
+          echo "Pre-build completado (aunque haya fallado, cache está poblada)" | tee -a "$LOG"
 
+      # ============================================================
+      # PASO 8.2 — PATCH AARs EN CACHE
+      # ============================================================
+      - name: 8.2. Patch AARs y transforms de Gradle cache
+        shell: bash
+        run: |
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 8.2: PATCH AARs =====" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
+          import os, re, zipfile, glob
+
+          HOME = os.path.expanduser("~")
+          CACHE = os.path.join(HOME, ".gradle", "caches")
+          if not os.path.isdir(CACHE):
+              print("No hay cache"); raise SystemExit(0)
+
+          RE_PLURAL = re.compile(r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL)
+          RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
+          RE_ITEM_SELF = re.compile(r'<item(\s[^>]*)?/>')
+
+          def fix_xml(text):
+              orig = text
+              text = text.replace(']]>', '')
+              text = text.replace(']]&gt;', '')
+              def repl_block(m):
+                  block = m.group(0)
+                  he = block.find('>') + 1
+                  ts = block.rfind('</plurals>')
+                  if he <= 0 or ts <= 0: return block
+                  head, body, tail = block[:he], block[he:ts], block[ts:]
+                  def fx_self(im):
+                      attrs = im.group(1) or ''
+                      if 'quantity' in attrs: return im.group(0)
+                      return f'<item quantity="other"{attrs}/>'
+                  def fx_pair(im):
+                      attrs = im.group(1) or ''
+                      if 'quantity' in attrs: return im.group(0)
+                      return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
+                  body = RE_ITEM_SELF.sub(fx_self, body)
+                  body = RE_ITEM.sub(fx_pair, body)
+                  return head + body + tail
+              text = RE_PLURAL.sub(repl_block, text)
+              return text, text != orig
+
+          total = 0
+
+          # 1. Transforms (extraídos)
+          for tdir in glob.glob(os.path.join(CACHE, "transforms-*")):
+              for root, _, files in os.walk(tdir):
+                  rp = root.replace("\\", "/")
+                  if "/transformed/" not in rp: continue
+                  if "/res/values" not in rp: continue
+                  for fn in files:
+                      if not fn.endswith(".xml"): continue
+                      p = os.path.join(root, fn)
+                      try:
+                          text = open(p, encoding="utf-8", errors="replace").read()
+                          t2, ch = fix_xml(text)
+                          if ch:
+                              open(p, "w", encoding="utf-8").write(t2)
+                              print(f"[TRANSFORM] {p}")
+                              total += 1
+                      except: pass
+
+          # 2. AARs originales
+          for aar in glob.glob(os.path.join(CACHE, "modules-2", "**", "*.aar"), recursive=True):
+              try:
+                  with zipfile.ZipFile(aar, 'r') as zin:
+                      changes = {}
+                      for name in zin.namelist():
+                          if not name.endswith(".xml"): continue
+                          if "/res/values" not in name: continue
+                          data = zin.read(name).decode("utf-8", errors="replace")
+                          nd, ch = fix_xml(data)
+                          if ch:
+                              changes[name] = nd
+                              print(f"[AAR] {aar}::{name}")
+                              total += 1
+                      if changes:
+                          tmp = aar + ".patched"
+                          with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+                              for item in zin.infolist():
+                                  if item.filename in changes:
+                                      zout.writestr(item, changes[item.filename])
+                                  else:
+                                      zout.writestr(item, zin.read(item.filename))
+                          os.replace(tmp, aar)
+              except: pass
+
+          print(f"Total parcheados: {total}")
+          PYEOF
+
+      # ============================================================
+      # PASO 8.3 — BUILD FINAL
+      # ============================================================
+      - name: 8.3. Build final
+        shell: bash
+        run: |
+          set -o pipefail
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 8.3: BUILD FINAL =====" | tee -a "$LOG"
+          cd project
+          chmod +x gradlew 2>/dev/null || true
+          if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
+          export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
           set +e
           "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee -a "$LOG"
           RC=${PIPESTATUS[0]}
@@ -345,11 +421,18 @@ jobs:
             MERGED="app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir"
             for f in "$MERGED/values/values.xml" "$MERGED/values-hi/values-hi.xml"; do
               if [ -f "$f" ]; then
-                echo "--- $f ---" | tee -a "$LOG"
-                echo "  ]]> residuales:" | tee -a "$LOG"
-                grep -n ']]>' "$f" | head -10 | tee -a "$LOG" || echo "  (ninguno)" | tee -a "$LOG"
-                echo "  <item> sin quantity:" | tee -a "$LOG"
-                grep -n '<item>' "$f" | head -10 | tee -a "$LOG" || echo "  (ninguno)" | tee -a "$LOG"
+                echo "--- $f: <plurals> con <item> sin quantity ---" | tee -a "$LOG"
+                python3 - "$f" <<'PY' 2>&1 | tee -a "$LOG"
+          import sys, re
+          src = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+          for m in re.finditer(r'<plurals\b[^>]*>.*?</plurals>', src, re.DOTALL):
+              block = m.group(0)
+              nm = re.search(r'name="([^"]*)"', block)
+              name = nm.group(1) if nm else '?'
+              for im in re.finditer(r'<item(\s[^>]*)?/?>', block):
+                  if 'quantity' not in (im.group(1) or ''):
+                      print(f"  [BAD] plurals={name}: {im.group(0)[:100]}")
+          PY
               fi
             done
           fi
