@@ -50,44 +50,37 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
-      # PASO 6.5 — NORMALIZAR ENCODING DE TODOS LOS XML (file + iconv)
+      # PASO 6.5 — UTF-8
       # ============================================================
-      - name: 6.5. Normalizar encoding de todos los XML
+      - name: 6.5. Normalizar encoding de XML
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
           : > "$LOG"
-          echo "===== STEP 6.5: UTF-8 NORMALIZATION (file+iconv) =====" | tee -a "$LOG"
+          echo "===== STEP 6.5 =====" | tee -a "$LOG"
           RES="project/app/src/main/res"
           COUNT=0
-
           while IFS= read -r -d '' f; do
             ENC=$(file --mime-encoding -b "$f" 2>/dev/null || echo "unknown")
             case "$ENC" in
-              utf-8|us-ascii|ascii|utf8)
-                ;;
+              utf-8|us-ascii|ascii|utf8) ;;
               *)
                 echo "[ICONV] $f : $ENC" | tee -a "$LOG"
                 if iconv -f "$ENC" -t UTF-8 "$f" -o "$f.tmp" 2>/dev/null; then
-                  mv "$f.tmp" "$f"
-                  COUNT=$((COUNT+1))
+                  mv "$f.tmp" "$f"; COUNT=$((COUNT+1))
                 else
                   rm -f "$f.tmp"
-                  echo "  (iconv falló, intentando utf-16) " | tee -a "$LOG"
                   if iconv -f UTF-16 -t UTF-8 "$f" -o "$f.tmp" 2>/dev/null; then
-                    mv "$f.tmp" "$f"
-                    COUNT=$((COUNT+1))
+                    mv "$f.tmp" "$f"; COUNT=$((COUNT+1))
                   else
                     rm -f "$f.tmp"
-                    echo "  (no se pudo convertir: $f)" | tee -a "$LOG"
                   fi
                 fi
                 ;;
             esac
           done < <(find "$RES" -type f -name "*.xml" -print0)
-
-          echo "Convertidos a UTF-8: $COUNT" | tee -a "$LOG"
+          echo "Convertidos: $COUNT" | tee -a "$LOG"
 
       # ============================================================
       # PASO 7 — VECTORES
@@ -102,7 +95,6 @@ jobs:
           import os, re
           BASE = "project/app/src/main/res"
           DIRS = [d for d in os.listdir(BASE) if d.startswith("drawable")] if os.path.isdir(BASE) else []
-
           RE_REF = re.compile(
               r'(strokeColor|fillColor|color)\s*=\s*"'
               r'(@color/|@android:color/|@drawable/|\?attr/|\?android:attr/)'
@@ -111,7 +103,6 @@ jobs:
           def lit(m): return f'{m.group(1)}="#FF000000"'
           RE_VEC_OPEN = re.compile(r'<vector\b[^>]*>', re.DOTALL)
           fixed = 0
-
           for d in DIRS:
               full = os.path.join(BASE, d)
               for root, _, files in os.walk(full):
@@ -147,59 +138,44 @@ jobs:
           PYEOF
 
       # ============================================================
-      # PASO 7.2 — Fix ]]> con sed + plurals con Python
+      # PASO 7.2 — STRINGS / PLURALS (source)
       # ============================================================
-      - name: 7.2. Corregir strings y plurals
+      - name: 7.2. Corregir strings y plurals (source)
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.2: STRINGS / PLURALS =====" | tee -a "$LOG"
+          echo "===== STEP 7.2 =====" | tee -a "$LOG"
           RES="project/app/src/main/res"
-
-          echo "--- Fix ]]> en values* con sed ---" | tee -a "$LOG"
-          GT_COUNT=0
-          while IFS= read -r -d '' f; do
-            if grep -q ']]>' "$f" 2>/dev/null; then
-              echo "  []]>] $f" | tee -a "$LOG"
-              sed -i 's/]]>/]]\&gt;/g' "$f"
-              GT_COUNT=$((GT_COUNT+1))
-            fi
-          done < <(find "$RES" -type f -name "*.xml" \( -path "*/values/*" -o -path "*/values-*/*" \) -print0)
-          echo "  Archivos con ]]> corregidos: $GT_COUNT" | tee -a "$LOG"
-
-          echo "--- Fix plurals sin quantity con Python ---" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
           RES = "project/app/src/main/res"
           RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
           RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
-          fixed = 0
+          fix = 0
           for root, _, files in os.walk(RES):
-              base = os.path.basename(root)
-              if not base.startswith("values"): continue
+              if not os.path.basename(root).startswith("values"): continue
               for fn in files:
-                  if not fn.lower().endswith(".xml"): continue
+                  if not fn.endswith(".xml"): continue
                   p = os.path.join(root, fn)
-                  try:
-                      src = open(p, encoding="utf-8", errors="replace").read()
-                  except Exception as e:
-                      print(f"  [ERR] {p}: {e}"); continue
+                  try: src = open(p, encoding="utf-8", errors="replace").read()
+                  except: continue
                   orig = src
+                  if ']]>' in src:
+                      src = src.replace(']]>', ']]&gt;')
                   def repl(m):
                       head, body, tail = m.group(1), m.group(2), m.group(3)
                       def fx(im):
                           attrs = im.group(1) or ""
-                          if 'quantity' in attrs:
-                              return im.group(0)
+                          if 'quantity' in attrs: return im.group(0)
                           return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
                       return head + RE_ITEM.sub(fx, body) + tail
                   src = RE_PLURAL.sub(repl, src)
                   if src != orig:
                       open(p, "w", encoding="utf-8").write(src)
-                      print(f"  [plurals] {p}")
-                      fixed += 1
-          print(f"  plurals corregidos: {fixed}")
+                      print(f"[source fix] {p}")
+                      fix += 1
+          print(f"Source files corregidos: {fix}")
           PYEOF
 
       # ============================================================
@@ -209,44 +185,41 @@ jobs:
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.3: DELETE 9.PNG =====" | tee -a "$LOG"
+          echo "===== STEP 7.3 =====" | tee -a "$LOG"
           find project/app/src/main/res -name "*.9.png" -type f -delete 2>&1 | tee -a "$LOG" || true
-          REMAIN=$(find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | wc -l)
-          echo "Restantes .9.png: $REMAIN" | tee -a "$LOG"
+          echo "Restantes: $(find project/app/src/main/res -name '*.9.png' -type f 2>/dev/null | wc -l)" | tee -a "$LOG"
 
       # ============================================================
-      # PASO 7.4 — VERIFICACIÓN
+      # PASO 7.4 — VERIFICAR SOURCE
       # ============================================================
-      - name: 7.4. Verificación estricta
+      - name: 7.4. Verificación source
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.4: VERIFICACIÓN =====" | tee -a "$LOG"
+          echo "===== STEP 7.4 =====" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
           RES = "project/app/src/main/res"
-          gt_files = []
-          plural_files = []
+          gt, pl = [], []
           for root, _, files in os.walk(RES):
               if not os.path.basename(root).startswith("values"): continue
               for fn in files:
-                  if not fn.lower().endswith(".xml"): continue
+                  if not fn.endswith(".xml"): continue
                   p = os.path.join(root, fn)
                   src = open(p, encoding="utf-8", errors="replace").read()
-                  if ']]>' in src:
-                      gt_files.append(p)
+                  if ']]>' in src: gt.append(p)
                   for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
                       for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
-                          attrs = im.group(1) or ''
-                          if 'quantity' not in attrs:
-                              plural_files.append((p, im.group(0)[:80]))
-          print(f"--- ]]> en values*: {len(gt_files)} ---")
-          for p in gt_files[:20]: print(f"  {p}")
-          print(f"--- <plurals> con <item> sin quantity: {len(plural_files)} ---")
-          for p, frag in plural_files[:20]: print(f"  {p}: {frag}")
-          print("OK" if not gt_files and not plural_files else "::warning::Recursos aún con problemas")
+                          if 'quantity' not in (im.group(1) or ''):
+                              pl.append((p, im.group(0)[:80]))
+          print(f"]]> en source: {len(gt)}")
+          print(f"plurals sin quantity en source: {len(pl)}")
+          print("OK source" if not gt and not pl else "WARN source")
           PYEOF
 
+      # ============================================================
+      # PASO 7.5 — CONFIGURAR GRADLE
+      # ============================================================
       - name: 7.5. Configurar Gradle y Plugins
         shell: bash
         run: |
@@ -280,13 +253,19 @@ jobs:
           fi
           cd ..
 
-      - name: 7.7. Diagnóstico
+      - name: 7.7. Diagnóstico de proyectos y AARs
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 7.7 =====" | tee -a "$LOG"
-          echo "Archivos en res/: $(find project/app/src/main/res -type f | wc -l)" | tee -a "$LOG"
-          echo "Peso res/: $(du -sh project/app/src/main/res | cut -f1)" | tee -a "$LOG"
+          echo "===== STEP 7.7: DIAGNÓSTICO =====" | tee -a "$LOG"
+          echo "--- Archivos en res/: $(find project/app/src/main/res -type f | wc -l) ---" | tee -a "$LOG"
+          echo "--- Peso res/: $(du -sh project/app/src/main/res | cut -f1) ---" | tee -a "$LOG"
+          echo "--- AARs locales ---" | tee -a "$LOG"
+          find project -name "*.aar" 2>/dev/null | head -30 | tee -a "$LOG" || echo "(ninguno)" | tee -a "$LOG"
+          echo "--- Otras carpetas res (fuera de build/) ---" | tee -a "$LOG"
+          find project -type d -name "res" 2>/dev/null | grep -v "/build/" | head -30 | tee -a "$LOG"
+          echo "--- Buscar 'custom_gifts_guidelines_info_monthly_limit' ---" | tee -a "$LOG"
+          grep -rl "custom_gifts_guidelines_info_monthly_limit" project/ 2>/dev/null | head -10 | tee -a "$LOG" || echo "(no encontrado)" | tee -a "$LOG"
 
       - name: 7.9. Memoria de Gradle
         shell: bash
@@ -307,7 +286,95 @@ jobs:
           cd ..
 
       # ============================================================
-      # PASO 8 — COMPILAR (con reintento post-patch del merged)
+      # PASO 7.9.5 — POBLAR CACHE + PATCH AAR TRANSFORMS
+      # ============================================================
+      - name: 7.9.5. Poblar cache y parchear AARs extraídos
+        shell: bash
+        run: |
+          set -e
+          LOG="$GITHUB_WORKSPACE/build.log"
+          echo "===== STEP 7.9.5: POPULATE CACHE + PATCH AARs =====" | tee -a "$LOG"
+
+          cd project
+          chmod +x gradlew 2>/dev/null || true
+          if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
+          export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
+
+          echo "--- Resolviendo dependencias (popula cache) ---" | tee -a "$LOG"
+          set +e
+          "$G" --no-daemon --offline=false :app:dependencies --configuration debugRuntimeClasspath 2>&1 | tail -10 | tee -a "$LOG"
+          set -e
+
+          echo "--- Parcheando transforms de AARs extraídos ---" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
+          import os, re, glob
+
+          HOME = os.path.expanduser("~")
+          CACHE = os.path.join(HOME, ".gradle", "caches")
+          if not os.path.isdir(CACHE):
+              print("No hay cache")
+              raise SystemExit(0)
+
+          RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
+          RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
+
+          def fix_xml(text):
+              orig = text
+              text = text.replace(']]>', ']]&gt;')
+              def repl(m):
+                  head, body, tail = m.group(1), m.group(2), m.group(3)
+                  def fx(im):
+                      attrs = im.group(1) or ""
+                      if 'quantity' in attrs: return im.group(0)
+                      return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
+                  return head + RE_ITEM.sub(fx, body) + tail
+              text = RE_PLURAL.sub(repl, text)
+              return text, text != orig
+
+          total = 0
+          # 1) Buscar en transforms-*
+          for tdir in glob.glob(os.path.join(CACHE, "transforms-*")):
+              for root, _, files in os.walk(tdir):
+                  if "/transformed/" not in root.replace("\\","/"): continue
+                  for fn in files:
+                      if not fn.endswith(".xml"): continue
+                      p = os.path.join(root, fn)
+                      if "/values" not in p: continue
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="replace") as f:
+                              text = f.read()
+                          text2, ch = fix_xml(text)
+                          if ch:
+                              with open(p, "w", encoding="utf-8") as f:
+                                  f.write(text2)
+                              print(f"[TRANSFORM] {p}")
+                              total += 1
+                      except Exception:
+                          pass
+          # 2) Buscar también en exploded-aar / módulos
+          for root_dir in [os.path.join(CACHE, "modules-2")]:
+              if not os.path.isdir(root_dir): continue
+              for root, _, files in os.walk(root_dir):
+                  for fn in files:
+                      if not fn.endswith(".xml"): continue
+                      if "/res/values" not in root.replace("\\","/"): continue
+                      p = os.path.join(root, fn)
+                      try:
+                          with open(p, "r", encoding="utf-8", errors="replace") as f:
+                              text = f.read()
+                          text2, ch = fix_xml(text)
+                          if ch:
+                              with open(p, "w", encoding="utf-8") as f:
+                                  f.write(text2)
+                              print(f"[MODULE] {p}")
+                              total += 1
+                      except Exception:
+                          pass
+          print(f"Archivos parcheados en cache: {total}")
+          PYEOF
+
+      # ============================================================
+      # PASO 8 — COMPILAR
       # ============================================================
       - name: 8. Compilar
         shell: bash
@@ -320,77 +387,20 @@ jobs:
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
 
-          echo "===== Intento 1 =====" | tee -a "$LOG"
           set +e
           "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee -a "$LOG"
           RC=${PIPESTATUS[0]}
-          set -e
 
           if [ "$RC" -ne 0 ]; then
             echo "" | tee -a "$LOG"
-            echo "===== PARCHEANDO MERGED Y REINTENTANDO =====" | tee -a "$LOG"
+            echo "===== DIAGNÓSTICO POST-FALLO =====" | tee -a "$LOG"
             MERGED="app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir"
-
-            if [ -d "$MERGED" ]; then
-              echo "--- Fix ]]> en merged ---" | tee -a "$LOG"
-              while IFS= read -r -d '' f; do
-                if grep -q ']]>' "$f" 2>/dev/null; then
-                  echo "  []]>] $f" | tee -a "$LOG"
-                  sed -i 's/]]>/]]\&gt;/g' "$f"
-                fi
-              done < <(find "$MERGED" -type f -name "*.xml" -print0)
-
-              echo "--- Fix plurals sin quantity en merged ---" | tee -a "$LOG"
-              python3 - "$MERGED" <<'PY' 2>&1 | tee -a "$LOG"
-          import os, re, sys
-          MERGED = sys.argv[1]
-          RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
-          RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
-          fixed = 0
-          for root, _, files in os.walk(MERGED):
-              for fn in files:
-                  if not fn.endswith(".xml"): continue
-                  p = os.path.join(root, fn)
-                  try:
-                      src = open(p, encoding="utf-8", errors="replace").read()
-                  except Exception:
-                      continue
-                  orig = src
-                  def repl(m):
-                      head, body, tail = m.group(1), m.group(2), m.group(3)
-                      def fx(im):
-                          attrs = im.group(1) or ""
-                          if 'quantity' in attrs: return im.group(0)
-                          return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
-                      return head + RE_ITEM.sub(fx, body) + tail
-                  src = RE_PLURAL.sub(repl, src)
-                  if src != orig:
-                      open(p, "w", encoding="utf-8").write(src)
-                      print(f"  [plurals] {p}")
-                      fixed += 1
-          print(f"  plurals merged corregidos: {fixed}")
-          PY
-            else
-              echo "  (merged.dir no existe)" | tee -a "$LOG"
-            fi
-
-            echo "" | tee -a "$LOG"
-            echo "===== REINTENTO =====" | tee -a "$LOG"
-            set +e
-            "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee -a "$LOG"
-            RC=${PIPESTATUS[0]}
-            set -e
-          fi
-
-          if [ "$RC" -ne 0 ]; then
-            echo "" | tee -a "$LOG"
-            echo "===== DIAGNÓSTICO FINAL =====" | tee -a "$LOG"
-            VALUES="app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values/values.xml"
-            VALUES_HI="app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values-hi/values-hi.xml"
-            [ -f "$VALUES" ] && echo "--- values.xml: ]]> residuales ---" | tee -a "$LOG" \
-              && grep -n ']]>' "$VALUES" | head -10 | tee -a "$LOG" || true
-            [ -f "$VALUES_HI" ] && echo "--- values-hi.xml: <item> sin quantity ---" | tee -a "$LOG" \
-              && grep -n '<item>' "$VALUES_HI" | head -10 | tee -a "$LOG" || true
+            [ -f "$MERGED/values/values.xml" ] && \
+              echo "--- ]]> residuales en merged/values ---" | tee -a "$LOG" && \
+              grep -n ']]>' "$MERGED/values/values.xml" | head -10 | tee -a "$LOG"
+            [ -f "$MERGED/values-hi/values-hi.xml" ] && \
+              echo "--- <item> sin quantity en merged/values-hi ---" | tee -a "$LOG" && \
+              grep -n '<item>' "$MERGED/values-hi/values-hi.xml" | head -10 | tee -a "$LOG"
           fi
 
           exit $RC
