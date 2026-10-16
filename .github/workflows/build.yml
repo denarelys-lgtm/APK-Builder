@@ -69,15 +69,14 @@ jobs:
           fi
           echo "Corrección completada."
 
-      - name: 7.5. Configurar repositorios de Gradle y complementos
+      - name: 7.5. Forzar configuración correcta de Gradle y Plugins
         shell: bash
         run: |
           set -e
-          echo "Verificando y configurando settings.gradle..."
+          cd project
           
-          # Si no existe settings.gradle, lo creamos
-          if [ ! -f "project/settings.gradle" ]; then
-            cat << 'EOF' > project/settings.gradle
+          echo "Generando un settings.gradle limpio con soporte para plugins de Android..."
+          cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
                   google()
@@ -95,17 +94,18 @@ jobs:
           rootProject.name = "APK-Builder"
           include ':app'
           EOF
-          else
-            # Si existe pero le falta pluginManagement, se lo anteponemos
-            if ! grep -q "pluginManagement" project/settings.gradle; then
-              sed -i '1i pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\n' project/settings.gradle
-            fi
-            # Si le falta google() en los repositorios, lo añadimos
-            if ! grep -q "google()" project/settings.gradle; then
-              echo "Añadiendo repositorio google() a settings.gradle"
-              echo -e "\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> project/settings.gradle
-            fi
+
+          echo "Verificando build.gradle a nivel de raíz..."
+          if [ ! -f "build.gradle" ]; then
+            cat << 'EOF' > build.gradle
+          // Archivo build.gradle raíz generado automáticamente
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+          }
+          EOF
           fi
+          
+          cd ..
 
       - name: 8. Compilar
         shell: bash
