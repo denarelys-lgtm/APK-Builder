@@ -97,16 +97,44 @@ jobs:
 
           echo "Asegurando que el plugin en app/build.gradle tenga la versión correcta..."
           if [ -f "app/build.gradle" ]; then
-            # Reemplazar la declaración del plugin para incluir la versión '8.2.0' explícitamente
             sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
             sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
-            
-            # Si no tiene com.android.application escrito de esa forma, aseguramos el bloque al inicio del archivo
+
             if ! grep -q "com.android.application" app/build.gradle; then
               sed -i '1i plugins {\n    id "com.android.application" version "8.2.0"\n}\n' app/build.gradle
             fi
           fi
           
+          cd ..
+
+      - name: 7.7. Diagnóstico de recursos
+        shell: bash
+        run: |
+          echo "Cantidad de archivos en res/:"
+          find project/app/src/main/res -type f 2>/dev/null | wc -l || true
+          echo "Peso de res/:"
+          du -sh project/app/src/main/res 2>/dev/null || true
+          echo "Primeras líneas de app/build.gradle:"
+          head -30 project/app/build.gradle 2>/dev/null || true
+
+      - name: 7.9. Configurar memoria de Gradle
+        shell: bash
+        run: |
+          set -e
+          cd project
+          rm -f gradle.properties
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
+          org.gradle.daemon=false
+          org.gradle.parallel=false
+          org.gradle.workers.max=2
+          org.gradle.caching=true
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          EOF
+          echo "gradle.properties generado:"
+          cat gradle.properties
           cd ..
 
       - name: 8. Compilar
@@ -116,6 +144,7 @@ jobs:
           cd project
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
+          export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
           "$G" --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee ../build.log
 
       - name: 9. Subir log
