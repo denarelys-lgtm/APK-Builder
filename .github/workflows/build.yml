@@ -55,17 +55,57 @@ jobs:
         run: |
           set -e
           echo "Reemplazando referencias a colores en archivos de vectores..."
-          find project/app/src/main/res/drawable/ -name "*.xml" -exec sed -i \
-            -e 's/?attr\/colorPrimary/#6200EE/g' \
-            -e 's/?attr\/colorPrimaryDark/#3700B3/g' \
-            -e 's/?attr\/colorSecondary/#03DAC6/g' \
-            -e 's/?attr\/colorTertiary/#018786/g' \
-            -e 's/?attr\/diamondIconColor/#FFD700/g' \
-            -e 's/?attr\/colorStroke/#000000/g' \
-            -e 's/?attr\/label_tertiary_active/#FF0000/g' \
-            -e 's/?attr\/backgrounds_secondary_active/#CCCCCC/g' \
-            {} +
+          if [ -d "project/app/src/main/res/drawable/" ]; then
+            find project/app/src/main/res/drawable/ -name "*.xml" -exec sed -i \
+              -e 's/?attr\/colorPrimary/#6200EE/g' \
+              -e 's/?attr\/colorPrimaryDark/#3700B3/g' \
+              -e 's/?attr\/colorSecondary/#03DAC6/g' \
+              -e 's/?attr\/colorTertiary/#018786/g' \
+              -e 's/?attr\/diamondIconColor/#FFD700/g' \
+              -e 's/?attr\/colorStroke/#000000/g' \
+              -e 's/?attr\/label_tertiary_active/#FF0000/g' \
+              -e 's/?attr\/backgrounds_secondary_active/#CCCCCC/g' \
+              {} + || true
+          fi
           echo "Corrección completada."
+
+      - name: 7.5. Configurar repositorios de Gradle y complementos
+        shell: bash
+        run: |
+          set -e
+          echo "Verificando y configurando settings.gradle..."
+          
+          # Si no existe settings.gradle, lo creamos
+          if [ ! -f "project/settings.gradle" ]; then
+            cat << 'EOF' > project/settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "APK-Builder"
+          include ':app'
+          EOF
+          else
+            # Si existe pero le falta pluginManagement, se lo anteponemos
+            if ! grep -q "pluginManagement" project/settings.gradle; then
+              sed -i '1i pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\n' project/settings.gradle
+            fi
+            # Si le falta google() en los repositorios, lo añadimos
+            if ! grep -q "google()" project/settings.gradle; then
+              echo "Añadiendo repositorio google() a settings.gradle"
+              echo -e "\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> project/settings.gradle
+            fi
+          fi
 
       - name: 8. Compilar
         shell: bash
