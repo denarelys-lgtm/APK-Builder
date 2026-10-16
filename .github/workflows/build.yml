@@ -50,31 +50,92 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: 7. Corregir atributos en vectores
+      # ============================================================
+      # PASO 7 — VECTORES: reemplaza TODAS las referencias simbólicas
+      # Cubre: @color/, @drawable/, ?attr/  y width/height=0
+      # ============================================================
+      - name: 7. Corregir vectores (referencias y dimensiones)
         shell: bash
         run: |
           set -e
-          echo "Reemplazando referencias a colores en archivos de vectores..."
+          echo "== 7.1 Reemplazando referencias simbólicas en vectores =="
           if [ -d "project/app/src/main/res/drawable/" ]; then
-            find project/app/src/main/res/drawable/ -name "*.xml" -exec sed -i \
-              -e 's/?attr\/colorPrimary/#6200EE/g' \
-              -e 's/?attr\/colorPrimaryDark/#3700B3/g' \
-              -e 's/?attr\/colorSecondary/#03DAC6/g' \
-              -e 's/?attr\/colorTertiary/#018786/g' \
-              -e 's/?attr\/diamondIconColor/#FFD700/g' \
-              -e 's/?attr\/colorStroke/#000000/g' \
-              -e 's/?attr\/label_tertiary_active/#FF0000/g' \
-              -e 's/?attr\/backgrounds_secondary_active/#CCCCCC/g' \
-              {} + || true
+            find project/app/src/main/res/drawable/ -name "*.xml" -print0 \
+              | xargs -0 -r sed -i \
+                -e 's/\(strokeColor\|fillColor\)="@color\/[^"]*"/\1="#FF000000"/g' \
+                -e 's/\(strokeColor\|fillColor\)="@android:color\/[^"]*"/\1="#FF000000"/g' \
+                -e 's/\(strokeColor\|fillColor\)="@drawable\/[^"]*"/\1="#FF000000"/g' \
+                -e 's/\(strokeColor\|fillColor\)="?attr\/[^"]*"/\1="#FF000000"/g' \
+                -e 's/\(strokeColor\|fillColor\)="?android:attr\/[^"]*"/\1="#FF000000"/g' \
+                -e 's/android:width="0[^"]*"/android:width="24dp"/g' \
+                -e 's/android:height="0[^"]*"/android:height="24dp"/g'
           fi
-          echo "Corrección completada."
+          echo "== 7.2 Verificación (debería salir vacío) =="
+          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|@android:color/|\?attr/|\?android:attr/)' \
+            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK: sin referencias simbólicas"
+          grep -rEl 'android:(width|height)="0' \
+            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK: sin dimensiones 0"
+
+      # ============================================================
+      # PASO 7.2 — XML DE STRINGS: arregla ]]> y <item> sin quantity
+      # ============================================================
+      - name: 7.2. Corregir XML de strings y plurals
+        shell: bash
+        run: |
+          set -e
+          RES="project/app/src/main/res"
+
+          echo "== 7.2.1 Escapando ]]> suelto =="
+          find "$RES" -type f -name "*.xml" -print0 \
+            | xargs -0 -r sed -i 's/]]>/]]\&gt;/g'
+
+          echo "== 7.2.2 Añadiendo quantity=\"other\" a <item> sin atributo =="
+          # Solo toca <item> EXACTO (sin atributos). Los que ya tienen
+          # quantity u otros atributos no coinciden con el patrón.
+          find "$RES" -type f -name "strings.xml" -print0 \
+            | xargs -0 -r sed -i -E 's|<item>([^<]*)</item>|<item quantity="other">\1</item>|g'
+
+          echo "== 7.2.3 Verificación =="
+          if grep -rn ']]>' "$RES" 2>/dev/null; then
+            echo "::error::Aún quedan ]]> sin escapar"
+            exit 1
+          fi
+          if grep -rn '<item>' "$RES"/values*/strings.xml 2>/dev/null; then
+            echo "::warning::Aún quedan <item> sin quantity (revisar manualmente)"
+          fi
+          echo "Corrección de XML completada."
+
+      # ============================================================
+      # PASO 7.4 — Validación con xmllint (gate temprano)
+      # ============================================================
+      - name: 7.4. Validar todos los XML de recursos
+        shell: bash
+        run: |
+          set -e
+          RES="project/app/src/main/res"
+          if ! command -v xmllint >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils
+          fi
+          FAILED=0
+          while IFS= read -r -d '' f; do
+            if ! xmllint --noout "$f" 2>/dev/null; then
+              echo "::error file=$f::XML inválido"
+              xmllint --noout "$f" 2>&1 || true
+              FAILED=1
+            fi
+          done < <(find "$RES" -type f -name "*.xml" -print0)
+          if [ "$FAILED" -eq 1 ]; then
+            echo "Hay XML mal formados. Abortando antes de Gradle."
+            exit 1
+          fi
+          echo "OK: todos los XML son válidos."
 
       - name: 7.5. Forzar configuración correcta de Gradle y Plugins
         shell: bash
         run: |
           set -e
           cd project
-          
+
           echo "Generando un settings.gradle robusto..."
           cat << 'EOF' > settings.gradle
           pluginManagement {
@@ -104,7 +165,7 @@ jobs:
               sed -i '1i plugins {\n    id "com.android.application" version "8.2.0"\n}\n' app/build.gradle
             fi
           fi
-          
+
           cd ..
 
       - name: 7.7. Diagnóstico de recursos
@@ -114,6 +175,9 @@ jobs:
           find project/app/src/main/res -type f 2>/dev/null | wc -l || true
           echo "Peso de res/:"
           du -sh project/app/src/main/res 2>/dev/null || true
+          echo "Vectores con referencias residuales (debe estar vacío):"
+          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' \
+            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK"
           echo "Primeras líneas de app/build.gradle:"
           head -30 project/app/build.gradle 2>/dev/null || true
 
