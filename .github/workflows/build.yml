@@ -75,7 +75,7 @@ jobs:
           set -e
           cd project
           
-          echo "Generando un settings.gradle limpio..."
+          echo "Generando un settings.gradle robusto..."
           cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
@@ -95,12 +95,15 @@ jobs:
           include ':app'
           EOF
 
-          echo "Asegurando el bloque plugins en app/build.gradle con versión..."
+          echo "Asegurando que el plugin en app/build.gradle tenga la versión correcta..."
           if [ -f "app/build.gradle" ]; then
-            # Si el archivo usa 'id "com.android.application"', le agregamos la versión si no la tiene
-            if grep -q "com.android.application" app/build.gradle && ! grep -q "version" app/build.gradle; then
-              sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
-              sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
+            # Reemplazar la declaración del plugin para incluir la versión '8.2.0' explícitamente
+            sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
+            sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
+            
+            # Si no tiene com.android.application escrito de esa forma, aseguramos el bloque al inicio del archivo
+            if ! grep -q "com.android.application" app/build.gradle; then
+              sed -i '1i plugins {\n    id "com.android.application" version "8.2.0"\n}\n' app/build.gradle
             fi
           fi
           
