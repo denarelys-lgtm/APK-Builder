@@ -50,7 +50,7 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
-      # PASO 6.5 — CONVERTIR TODOS LOS XML A UTF-8 (causa raíz)
+      # PASO 6.5 — CONVERTIR TODO A UTF-8
       # ============================================================
       - name: 6.5. Convertir todos los XML a UTF-8
         shell: bash
@@ -68,42 +68,38 @@ jobs:
               if raw.startswith(codecs.BOM_UTF8):
                   return raw[3:].decode("utf-8"), "utf-8-bom"
               if raw.startswith(codecs.BOM_UTF16_LE):
-                  return raw.decode("utf-16-le"), "utf-16-le"
+                  return raw[2:].decode("utf-16-le"), "utf-16-le-bom"
               if raw.startswith(codecs.BOM_UTF16_BE):
-                  return raw.decode("utf-16-be"), "utf-16-be"
-              # Sin BOM: heurística
-              # Si hay muchos \x00 intercalados, es UTF-16
-              nulls = raw[:200].count(b"\x00")
+                  return raw[2:].decode("utf-16-be"), "utf-16-be-bom"
+              nulls = raw[:400].count(b"\x00")
               if nulls > 20:
-                  # probar LE vs BE
                   try:
-                      text = raw.decode("utf-16-le")
-                      if text.count("\x00") > 5:
-                          text = raw.decode("utf-16-be")
+                      t = raw.decode("utf-16-le")
+                      if t.count("\x00") > 5:
+                          t = raw.decode("utf-16-be")
                   except UnicodeDecodeError:
-                      text = raw.decode("utf-16-le", errors="replace")
-                  return text, "utf-16-heuristic"
+                      t = raw.decode("utf-16-le", errors="replace")
+                  return t, "utf-16-heur"
               try:
                   return raw.decode("utf-8"), "utf-8"
               except UnicodeDecodeError:
                   return raw.decode("latin-1"), "latin-1"
 
-          converted = 0
+          conv = 0
           for root, _, files in os.walk(RES):
               for fn in files:
                   if not fn.lower().endswith(".xml"): continue
-                  path = os.path.join(root, fn)
+                  p = os.path.join(root, fn)
                   try:
-                      text, enc = read_any(path)
+                      text, enc = read_any(p)
                   except Exception as e:
-                      print(f"[ERR] {path}: {e}")
-                      continue
+                      print(f"[ERR] {p}: {e}"); continue
                   if enc != "utf-8":
-                      print(f"[UTF8] {path}  ({enc} -> utf-8)")
-                      with open(path, "w", encoding="utf-8") as f:
+                      print(f"[UTF8] {p}  ({enc} -> utf-8)")
+                      with open(p, "w", encoding="utf-8") as f:
                           f.write(text)
-                      converted += 1
-          print(f"Convertidos a UTF-8: {converted}")
+                      conv += 1
+          print(f"Convertidos a UTF-8: {conv}")
           PYEOF
 
       # ============================================================
@@ -134,8 +130,8 @@ jobs:
               for root, _, files in os.walk(full):
                   for fn in files:
                       if not fn.lower().endswith(".xml"): continue
-                      path = os.path.join(root, fn)
-                      with open(path, "r", encoding="utf-8", errors="replace") as f:
+                      p = os.path.join(root, fn)
+                      with open(p, "r", encoding="utf-8", errors="replace") as f:
                           src = f.read()
                       orig = src
                       src = RE_REF.sub(lit, src)
@@ -157,14 +153,15 @@ jobs:
                           if fixedv != vec:
                               src = src.replace(vec, fixedv, 1)
                       if src != orig:
-                          with open(path, "w", encoding="utf-8") as f:
+                          with open(p, "w", encoding="utf-8") as f:
                               f.write(src)
                           fixed += 1
           print(f"Vectores corregidos: {fixed}")
           PYEOF
 
       # ============================================================
-      # PASO 7.2 — STRINGS/PLURALS (state machine + arrays/plurals)
+      # PASO 7.2 — STRINGS / PLURALS (con ET para detectar + regex para fix)
+      # SIN 2>/dev/null para que errores no se oculten
       # ============================================================
       - name: 7.2. Corregir strings y plurals
         shell: bash
@@ -174,67 +171,63 @@ jobs:
           echo "===== STEP 7.2: STRINGS / PLURALS =====" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
+          import xml.etree.ElementTree as ET
           RES = "project/app/src/main/res"
 
-          def fix_gt_sequences(text):
-              out = []
-              i = 0
-              n = len(text)
-              while i < n:
-                  next_cdata = text.find("<![CDATA[", i)
-                  next_close = text.find("]]>", i)
-                  if next_close == -1:
-                      out.append(text[i:]); break
-                  if next_cdata != -1 and next_cdata < next_close:
-                      cdata_end = text.find("]]>", next_cdata + 9)
-                      if cdata_end == -1:
-                          out.append(text[i:next_cdata])
-                          out.append(text[next_cdata:].replace("]]>", "]]&gt;"))
-                          break
-                      out.append(text[i:cdata_end + 3])
-                      i = cdata_end + 3
-                  else:
-                      out.append(text[i:next_close])
-                      out.append("]]&gt;")
-                      i = next_close + 3
-              return "".join(out)
+          # ---------- Fix 1: ]]> literal en cualquier XML de res/values* ----------
+          # (no aplica a CDATA porque resources casi nunca la usa)
+          def fix_gt(text):
+              if ']]>' not in text:
+                  return text, False
+              return text.replace(']]>', ']]&gt;'), True
 
-          RE_PLURAL_BLOCK = re.compile(r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL)
+          # ---------- Fix 2: <item> sin quantity dentro de <plurals> ----------
+          RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
           RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
 
-          def fix_plural_block(m):
-              block = m.group(0)
-              def fix_item(im):
-                  attrs = im.group(1) or ""
-                  content = im.group(2)
-                  if 'quantity' in attrs:
-                      return im.group(0)
-                  return f'<item quantity="other"{attrs}>{content}</item>'
-              return RE_ITEM.sub(fix_item, block)
+          def fix_plural_blocks(text):
+              changed = [False]
+              def repl(m):
+                  head, body, tail = m.group(1), m.group(2), m.group(3)
+                  def fix_item(im):
+                      attrs = im.group(1) or ""
+                      if 'quantity' in attrs:
+                          return im.group(0)
+                      changed[0] = True
+                      content = im.group(2)
+                      return f'<item quantity="other"{attrs}>{content}</item>'
+                  return head + RE_ITEM.sub(fix_item, body) + tail
+              return RE_PLURAL.sub(repl, text), changed[0]
 
-          fixed = 0
+          files_fixed = 0
           scanned = 0
           for root, _, files in os.walk(RES):
-              # Solo procesar carpetas values*/
               parent = os.path.basename(root)
               if not parent.startswith("values"):
                   continue
               for fn in files:
                   if not fn.lower().endswith(".xml"): continue
-                  path = os.path.join(root, fn)
+                  p = os.path.join(root, fn)
                   scanned += 1
-                  with open(path, "r", encoding="utf-8", errors="replace") as f:
+                  with open(p, "r", encoding="utf-8", errors="replace") as f:
                       src = f.read()
                   orig = src
-                  src = fix_gt_sequences(src)
-                  src = RE_PLURAL_BLOCK.sub(fix_plural_block, src)
+
+                  src, ch_gt = fix_gt(src)
+                  src, ch_pl = fix_plural_blocks(src)
+
+                  if ch_gt:
+                      print(f"  []]>] {p}")
+                  if ch_pl:
+                      print(f"  [plurals] {p}")
+
                   if src != orig:
-                      with open(path, "w", encoding="utf-8") as f:
+                      with open(p, "w", encoding="utf-8") as f:
                           f.write(src)
-                      print(f"[STRINGS] {path}")
-                      fixed += 1
+                      files_fixed += 1
+
           print(f"Archivos values* escaneados: {scanned}")
-          print(f"Strings/plurals corregidos: {fixed}")
+          print(f"Archivos corregidos: {files_fixed}")
           PYEOF
 
       # ============================================================
@@ -245,55 +238,56 @@ jobs:
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.3: DELETE 9.PNG =====" | tee -a "$LOG"
-          find project/app/src/main/res -name "*.9.png" -type f -print -delete 2>&1 | tee -a "$LOG" || true
+          find project/app/src/main/res -name "*.9.png" -type f -delete 2>&1 | tee -a "$LOG" || true
           REMAIN=$(find project/app/src/main/res -name "*.9.png" -type f 2>/dev/null | wc -l)
-          echo "Restantes: $REMAIN" | tee -a "$LOG"
+          echo "Restantes .9.png: $REMAIN" | tee -a "$LOG"
 
       # ============================================================
-      # PASO 7.4 — Verificación CORREGIDA (solo archivos values*/strings.xml)
+      # PASO 7.4 — VERIFICACIÓN CON PYTHON (sin 2>/dev/null)
       # ============================================================
-      - name: 7.4. Verificar valores
+      - name: 7.4. Verificación estricta
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.4: VERIFICACIÓN =====" | tee -a "$LOG"
+          python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
+          import os, re
+          RES = "project/app/src/main/res"
 
-          echo "--- ]]> en values*/strings.xml ---" | tee -a "$LOG"
-          FOUND=0
-          while IFS= read -r -d '' f; do
-            if grep -q ']]>' "$f" 2>/dev/null; then
-              echo "  $f" | tee -a "$LOG"; FOUND=1
-            fi
-          done < <(find project/app/src/main/res -type f -path "*/values*/*.xml" -print0)
-          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
+          issues = 0
+          gt_files = []
+          plural_files = []
 
-          echo "--- <plurals> con <item> sin quantity ---" | tee -a "$LOG"
-          FOUND=0
-          while IFS= read -r -d '' f; do
-            # Busca bloques plurals y verifica items
-            if python3 -c "
-          import sys, re
-          src = open('$f', encoding='utf-8', errors='replace').read()
-          for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
-              for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
-                  attrs = im.group(1) or ''
-                  if 'quantity' not in attrs:
-                      sys.exit(1)
-          sys.exit(0)
-          " 2>/dev/null; then :; else
-              echo "  $f" | tee -a "$LOG"; FOUND=1
-            fi
-          done < <(find project/app/src/main/res -type f -path "*/values*/*.xml" -print0)
-          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
+          for root, _, files in os.walk(RES):
+              for fn in files:
+                  if not fn.lower().endswith(".xml"): continue
+                  p = os.path.join(root, fn)
+                  with open(p, "r", encoding="utf-8", errors="replace") as f:
+                      src = f.read()
 
-          echo "--- Vectores con referencias simbólicas ---" | tee -a "$LOG"
-          FOUND=0
-          while IFS= read -r -d '' f; do
-            if grep -qE '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' "$f" 2>/dev/null; then
-              echo "  $f" | tee -a "$LOG"; FOUND=1
-            fi
-          done < <(find project/app/src/main/res -type f -path "*/drawable*/*.xml" -print0)
-          [ "$FOUND" -eq 0 ] && echo "  OK" | tee -a "$LOG"
+                  # ]]> en values
+                  if '/values' in p and ']]>' in src:
+                      gt_files.append(p)
+
+                  # <plurals> con <item> sin quantity
+                  for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
+                      for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
+                          attrs = im.group(1) or ''
+                          if 'quantity' not in attrs:
+                              plural_files.append((p, im.group(0)[:80]))
+
+          print(f"--- ]]> en values*: {len(gt_files)} ---")
+          for p in gt_files[:20]:
+              print(f"  {p}")
+          print(f"--- <plurals> con <item> sin quantity: {len(plural_files)} ---")
+          for p, frag in plural_files[:20]:
+              print(f"  {p}: {frag}")
+
+          if gt_files or plural_files:
+              print("::warning::Recursos aún con problemas")
+          else:
+              print("OK: sin problemas detectados")
+          PYEOF
 
       - name: 7.5. Configurar Gradle y Plugins
         shell: bash
@@ -354,9 +348,6 @@ jobs:
           EOF
           cd ..
 
-      # ============================================================
-      # PASO 8 — COMPILAR (con diagnóstico automático si falla)
-      # ============================================================
       - name: 8. Compilar
         shell: bash
         run: |
@@ -379,17 +370,27 @@ jobs:
             VALUES_HI="$GITHUB_WORKSPACE/project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values-hi/values-hi.xml"
 
             if [ -f "$VALUES" ]; then
-              echo "--- values.xml línea 12747 ±10 (¿qué hay ahí?) ---" | tee -a "$LOG"
-              sed -n '12737,12757p' "$VALUES" | cat -A | tee -a "$LOG"
-              echo "--- Buscando ]]> en values.xml merged ---" | tee -a "$LOG"
+              echo "--- values.xml: bloques <plurals> con ]]> ---" | tee -a "$LOG"
               grep -n ']]>' "$VALUES" | head -20 | tee -a "$LOG" || true
-            else
-              echo "(values.xml merged no existe)" | tee -a "$LOG"
+              echo "--- values.xml líneas con el nombre del plural roto ---" | tee -a "$LOG"
+              grep -n -A3 'custom_gifts_guidelines_info_monthly_limit' "$VALUES" | head -10 | tee -a "$LOG" || true
             fi
 
             if [ -f "$VALUES_HI" ]; then
-              echo "--- Buscando <plurals> sin quantity en values-hi.xml ---" | tee -a "$LOG"
-              grep -n 'plurals\|<item' "$VALUES_HI" | head -40 | tee -a "$LOG" || true
+              echo "--- values-hi.xml: bloques <plurals> sospechosos ---" | tee -a "$LOG"
+              python3 - "$VALUES_HI" <<'PY'
+import sys, re
+p = sys.argv[1]
+src = open(p, encoding='utf-8', errors='replace').read()
+for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
+    block = m.group(0)
+    name_m = re.search(r'name="([^"]*)"', block)
+    name = name_m.group(1) if name_m else '?'
+    for im in re.finditer(r'<item(\s[^>]*)?>', m.group(1)):
+        attrs = im.group(1) or ''
+        if 'quantity' not in attrs:
+            print(f"  [BAD] plurals={name}: {im.group(0)[:100]}")
+PY
             fi
           fi
 
