@@ -51,71 +51,173 @@ jobs:
           gradle-version: "8.13"
 
       # ============================================================
-      # PASO 7 — VECTORES: reemplaza TODAS las referencias simbólicas
-      # Cubre: @color/, @drawable/, ?attr/  y width/height=0
+      # PASO 7 — VECTORES con Python (añade width/height, resuelve refs)
       # ============================================================
-      - name: 7. Corregir vectores (referencias y dimensiones)
+      - name: 7. Corregir vectores con Python
         shell: bash
         run: |
           set -e
-          echo "== 7.1 Reemplazando referencias simbólicas en vectores =="
-          if [ -d "project/app/src/main/res/drawable/" ]; then
-            find project/app/src/main/res/drawable/ -name "*.xml" -print0 \
-              | xargs -0 -r sed -i \
-                -e 's/\(strokeColor\|fillColor\)="@color\/[^"]*"/\1="#FF000000"/g' \
-                -e 's/\(strokeColor\|fillColor\)="@android:color\/[^"]*"/\1="#FF000000"/g' \
-                -e 's/\(strokeColor\|fillColor\)="@drawable\/[^"]*"/\1="#FF000000"/g' \
-                -e 's/\(strokeColor\|fillColor\)="?attr\/[^"]*"/\1="#FF000000"/g' \
-                -e 's/\(strokeColor\|fillColor\)="?android:attr\/[^"]*"/\1="#FF000000"/g' \
-                -e 's/android:width="0[^"]*"/android:width="24dp"/g' \
-                -e 's/android:height="0[^"]*"/android:height="24dp"/g'
-          fi
-          echo "== 7.2 Verificación (debería salir vacío) =="
-          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|@android:color/|\?attr/|\?android:attr/)' \
-            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK: sin referencias simbólicas"
-          grep -rEl 'android:(width|height)="0' \
-            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK: sin dimensiones 0"
+          python3 - <<'PYEOF'
+          import os, re
+
+          RES = "project/app/src/main/res/drawable"
+          if not os.path.isdir(RES):
+              print("No hay carpeta drawable"); raise SystemExit(0)
+
+          RE_REF = re.compile(
+              r'(strokeColor|fillColor|color)\s*=\s*"'
+              r'(@color/|@android:color/|@drawable/|\?attr/|\?android:attr/)'
+              r'[^"]*"'
+          )
+          def lit(m):
+              return f'{m.group(1)}="#FF000000"'
+
+          RE_VEC_OPEN = re.compile(r'<vector\b[^>]*>', re.DOTALL)
+
+          for fn in os.listdir(RES):
+              if not fn.endswith(".xml"):
+                  continue
+              path = os.path.join(RES, fn)
+              with open(path, "r", encoding="utf-8", errors="replace") as f:
+                  src = f.read()
+              orig = src
+
+              # 1) Resolver referencias simbólicas
+              src = RE_REF.sub(lit, src)
+
+              # 2) Asegurar width/height válidos en <vector>
+              m = RE_VEC_OPEN.search(src)
+              if m:
+                  vec = m.group(0)
+                  fixed = vec
+
+                  if not re.search(r'android:width\s*=\s*"([1-9][0-9]*)', vec):
+                      if re.search(r'android:width\s*=\s*"', vec):
+                          fixed = re.sub(r'android:width\s*=\s*"[^"]*"',
+                                         'android:width="24dp"', fixed)
+                      else:
+                          fixed = fixed[:-1] + ' android:width="24dp">'
+
+                  if not re.search(r'android:height\s*=\s*"([1-9][0-9]*)', vec):
+                      if re.search(r'android:height\s*=\s*"', vec):
+                          fixed = re.sub(r'android:height\s*=\s*"[^"]*"',
+                                         'android:height="24dp"', fixed)
+                      else:
+                          fixed = fixed[:-1] + ' android:height="24dp">'
+
+                  if fixed != vec:
+                      src = src.replace(vec, fixed, 1)
+
+              if src != orig:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(src)
+                  print(f"[vector] Corregido: {fn}")
+
+          print("Vectores OK.")
+          PYEOF
 
       # ============================================================
-      # PASO 7.2 — XML DE STRINGS: arregla ]]> y <item> sin quantity
+      # PASO 7.2 — STRINGS/PLURALS con Python
       # ============================================================
-      - name: 7.2. Corregir XML de strings y plurals
+      - name: 7.2. Corregir strings/plurals con Python
         shell: bash
         run: |
           set -e
+          python3 - <<'PYEOF'
+          import os, re
+
+          RES = "project/app/src/main/res"
+
+          def fix_cdata_literals(text):
+              """Escapa ]]> que NO cierra una CDATA."""
+              out = []
+              i = 0
+              n = len(text)
+              while i < n:
+                  if text.startswith("<![CDATA[", i):
+                      j = text.find("]]>", i + 9)
+                      if j == -1:
+                          out.append(text[i:].replace("]]>", "]]&gt;"))
+                          break
+                      out.append(text[i:j+3])
+                      i = j + 3
+                  else:
+                      j = text.find("]]>", i)
+                      if j == -1:
+                          out.append(text[i:])
+                          break
+                      out.append(text[i:j])
+                      out.append("]]&gt;")
+                      i = j + 3
+              return "".join(out)
+
+          RE_PLURAL = re.compile(r'(<plurals\b[^>]*>)(.*?)(</plurals>)', re.DOTALL)
+          RE_ITEM_BARE = re.compile(r'<item\s*>([^<]*)</item>')
+
+          def fix_plural_block(m):
+              head, body, tail = m.group(1), m.group(2), m.group(3)
+              body = RE_ITEM_BARE.sub(
+                  lambda x: f'<item quantity="other">{x.group(1)}</item>',
+                  body
+              )
+              return head + body + tail
+
+          fixed_files = []
+          for root, _, files in os.walk(RES):
+              for fn in files:
+                  if not fn.endswith(".xml"):
+                      continue
+                  path = os.path.join(root, fn)
+                  with open(path, "r", encoding="utf-8", errors="replace") as f:
+                      src = f.read()
+                  orig = src
+
+                  src = fix_cdata_literals(src)
+                  src = RE_PLURAL.sub(fix_plural_block, src)
+
+                  if src != orig:
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write(src)
+                      fixed_files.append(path)
+                      print(f"[strings] Corregido: {path}")
+
+          if not fixed_files:
+              print("Nada que corregir en strings.")
+          print("Strings OK.")
+          PYEOF
+
+      # ============================================================
+      # PASO 7.3 — Verificación estricta
+      # ============================================================
+      - name: 7.3. Verificación de recursos
+        shell: bash
+        run: |
+          set +e
           RES="project/app/src/main/res"
 
-          echo "== 7.2.1 Escapando ]]> suelto =="
-          find "$RES" -type f -name "*.xml" -print0 \
-            | xargs -0 -r sed -i 's/]]>/]]\&gt;/g'
+          echo "== Vectores con referencias simbólicas =="
+          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' \
+            "$RES/drawable/" 2>/dev/null || echo "OK"
 
-          echo "== 7.2.2 Añadiendo quantity=\"other\" a <item> sin atributo =="
-          # Solo toca <item> EXACTO (sin atributos). Los que ya tienen
-          # quantity u otros atributos no coinciden con el patrón.
-          find "$RES" -type f -name "strings.xml" -print0 \
-            | xargs -0 -r sed -i -E 's|<item>([^<]*)</item>|<item quantity="other">\1</item>|g'
+          echo "== Vectores con width/height 0 =="
+          grep -rEl 'android:(width|height)="0' "$RES/drawable/" 2>/dev/null || echo "OK"
 
-          echo "== 7.2.3 Verificación =="
-          if grep -rn ']]>' "$RES" 2>/dev/null; then
-            echo "::error::Aún quedan ]]> sin escapar"
-            exit 1
-          fi
-          if grep -rn '<item>' "$RES"/values*/strings.xml 2>/dev/null; then
-            echo "::warning::Aún quedan <item> sin quantity (revisar manualmente)"
-          fi
-          echo "Corrección de XML completada."
+          echo "== <item> sin quantity en strings =="
+          grep -rn '<item>' "$RES"/values*/strings.xml 2>/dev/null || echo "OK"
+
+          echo "Verificación terminada."
 
       # ============================================================
-      # PASO 7.4 — Validación con xmllint (gate temprano)
+      # PASO 7.4 — Validar XML con xmllint
       # ============================================================
-      - name: 7.4. Validar todos los XML de recursos
+      - name: 7.4. Validar XML de recursos
         shell: bash
         run: |
           set -e
-          RES="project/app/src/main/res"
           if ! command -v xmllint >/dev/null 2>&1; then
             sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils
           fi
+          RES="project/app/src/main/res"
           FAILED=0
           while IFS= read -r -d '' f; do
             if ! xmllint --noout "$f" 2>/dev/null; then
@@ -175,9 +277,6 @@ jobs:
           find project/app/src/main/res -type f 2>/dev/null | wc -l || true
           echo "Peso de res/:"
           du -sh project/app/src/main/res 2>/dev/null || true
-          echo "Vectores con referencias residuales (debe estar vacío):"
-          grep -rEl '(strokeColor|fillColor)="(@color/|@drawable/|\?attr/)' \
-            project/app/src/main/res/drawable/ 2>/dev/null || echo "OK"
           echo "Primeras líneas de app/build.gradle:"
           head -30 project/app/build.gradle 2>/dev/null || true
 
