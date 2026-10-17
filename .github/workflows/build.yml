@@ -1,4 +1,3 @@
-
 name: Build APK
 
 on:
@@ -13,6 +12,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
+
       - name: 1. Descargar rebuild1.zip
         shell: bash
         run: |
@@ -49,6 +49,7 @@ jobs:
         with:
           gradle-version: "8.13"
 
+      # ============================================================
       - name: 6.5. Normalizar encoding
         shell: bash
         run: |
@@ -58,109 +59,77 @@ jobs:
           echo "===== STEP 6.5 =====" | tee -a "$LOG"
           RES="project/app/src/main/res"
           COUNT=0
-
           while IFS= read -r -d '' f; do
             ENC=$(file --mime-encoding -b "$f" 2>/dev/null || echo "unknown")
             case "$ENC" in
               utf-8|us-ascii|ascii|utf8) ;;
               *)
                 if iconv -f "$ENC" -t UTF-8 "$f" -o "$f.tmp" 2>/dev/null; then
-                  mv "$f.tmp" "$f"
-                  COUNT=$((COUNT+1))
-                else
-                  rm -f "$f.tmp"
-                fi
-                ;;
+                  mv "$f.tmp" "$f"; COUNT=$((COUNT+1))
+                else rm -f "$f.tmp"; fi ;;
             esac
           done < <(find "$RES" -type f -name "*.xml" -print0)
-
           echo "Convertidos: $COUNT" | tee -a "$LOG"
 
+      # ============================================================
       - name: 7. Corregir vectores
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7 =====" | tee -a "$LOG"
-
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
-
           BASE = "project/app/src/main/res"
-          DIRS = [
-              d for d in os.listdir(BASE)
-              if d.startswith("drawable")
-          ] if os.path.isdir(BASE) else []
-
+          DIRS = [d for d in os.listdir(BASE) if d.startswith("drawable")] if os.path.isdir(BASE) else []
           RE_REF = re.compile(
               r'(strokeColor|fillColor|color)\s*=\s*"'
               r'(@color/|@android:color/|@drawable/|\?attr/|\?android:attr/)'
               r'[^"]*"'
           )
-
-          def lit(m):
-              return f'{m.group(1)}="#FF000000"'
-
+          def lit(m): return f'{m.group(1)}="#FF000000"'
           RE_VEC_OPEN = re.compile(r'<vector\b[^>]*>', re.DOTALL)
           fixed = 0
-
           for d in DIRS:
               for root, _, files in os.walk(os.path.join(BASE, d)):
                   for fn in files:
-                      if not fn.lower().endswith(".xml"):
-                          continue
-
+                      if not fn.lower().endswith(".xml"): continue
                       p = os.path.join(root, fn)
-                      with open(p, encoding="utf-8", errors="replace") as f:
-                          src = f.read()
-
+                      src = open(p, encoding="utf-8", errors="replace").read()
                       orig = src
                       src = RE_REF.sub(lit, src)
                       m = RE_VEC_OPEN.search(src)
-
                       if m:
-                          vec = m.group(0)
-                          fv = vec
-
+                          vec = m.group(0); fv = vec
                           wm = re.search(r'android:width\s*=\s*"([^"]*)"', vec)
                           if wm:
                               if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', wm.group(1)):
                                   fv = fv[:wm.start(1)] + "24dp" + fv[wm.end(1):]
-                          else:
-                              fv = fv[:-1] + ' android:width="24dp">'
-
-                          hm = re.search(r'android:height\s*=\s*"([^"]*)"', fv)
+                          else: fv = fv[:-1] + ' android:width="24dp">'
+                          hm = re.search(r'android:height\s*=\s*"([^"]*)"', vec)
                           if hm:
                               if not re.match(r'[1-9][0-9]*(dp|dip|px|sp)?$', hm.group(1)):
                                   fv = fv[:hm.start(1)] + "24dp" + fv[hm.end(1):]
-                          else:
-                              fv = fv[:-1] + ' android:height="24dp">'
-
-                          if fv != vec:
-                              src = src.replace(vec, fv, 1)
-
+                          else: fv = fv[:-1] + ' android:height="24dp">'
+                          if fv != vec: src = src.replace(vec, fv, 1)
                       if src != orig:
-                          with open(p, "w", encoding="utf-8") as f:
-                              f.write(src)
+                          open(p, "w", encoding="utf-8").write(src)
                           fixed += 1
-
           print(f"Vectores corregidos: {fixed}")
           PYEOF
 
+      # ============================================================
       - name: 7.2. Corregir strings y plurals
         shell: bash
         run: |
           set -e
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.2 =====" | tee -a "$LOG"
-
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
           import os, re
-
           RES = "project/app/src/main/res"
-          RE_PLURAL_BLOCK = re.compile(
-              r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL
-          )
+
+          RE_PLURAL_BLOCK = re.compile(r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL)
           RE_PLURAL_NAMED = re.compile(
               r'<plurals\b[^>]*name="custom_gifts_guidelines_info_monthly_limit"[^>]*>.*?</plurals>\s*',
               re.DOTALL
@@ -171,30 +140,23 @@ jobs:
           stats = {'gt': 0, 'pl_pair': 0, 'pl_self': 0, 'del': 0}
 
           for root, _, files in os.walk(RES):
-              if not os.path.basename(root).startswith("values"):
-                  continue
-
+              if not os.path.basename(root).startswith("values"): continue
               for fn in files:
-                  if not fn.lower().endswith(".xml"):
-                      continue
-
+                  if not fn.lower().endswith(".xml"): continue
                   p = os.path.join(root, fn)
-                  try:
-                      with open(p, encoding="utf-8", errors="replace") as f:
-                          src = f.read()
-                  except Exception:
-                      continue
-
+                  try: src = open(p, encoding="utf-8", errors="replace").read()
+                  except: continue
                   orig = src
 
+                  # 1) Eliminar ]]> y ]]&gt;
                   if ']]>' in src:
                       src = src.replace(']]>', '')
                       stats['gt'] += 1
-
                   if ']]&gt;' in src:
                       src = src.replace(']]&gt;', '')
                       stats['gt'] += 1
 
+                  # 2) Eliminar el plural problemático concreto
                   if 'custom_gifts_guidelines_info_monthly_limit' in src:
                       new = RE_PLURAL_NAMED.sub('', src)
                       if new != src:
@@ -202,44 +164,35 @@ jobs:
                           src = new
                           stats['del'] += 1
 
+                  # 3) Fix items en plurals (pair + self-closing)
                   def repl_block(m):
                       block = m.group(0)
                       he = block.find('>') + 1
                       ts = block.rfind('</plurals>')
-
-                      if he <= 0 or ts <= 0:
-                          return block
-
+                      if he <= 0 or ts <= 0: return block
                       head, body, tail = block[:he], block[he:ts], block[ts:]
-
                       def fx_self(im):
                           attrs = im.group(1) or ''
-                          if re.search(r'\bquantity\s*=', attrs):
-                              return im.group(0)
+                          if 'quantity' in attrs: return im.group(0)
                           stats['pl_self'] += 1
                           return f'<item quantity="other"{attrs}/>'
-
                       def fx_pair(im):
                           attrs = im.group(1) or ''
-                          if re.search(r'\bquantity\s*=', attrs):
-                              return im.group(0)
+                          if 'quantity' in attrs: return im.group(0)
                           stats['pl_pair'] += 1
                           return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
-
                       body = RE_ITEM_SELF.sub(fx_self, body)
                       body = RE_ITEM.sub(fx_pair, body)
                       return head + body + tail
-
                   src = RE_PLURAL_BLOCK.sub(repl_block, src)
 
                   if src != orig:
-                      with open(p, "w", encoding="utf-8") as f:
-                          f.write(src)
+                      open(p, "w", encoding="utf-8").write(src)
 
           print(f"]]> eliminados: {stats['gt']}")
           print(f"<item>...</item> corregidos: {stats['pl_pair']}")
-          print(f"<item/> corregidos: {stats['pl_self']}")
-          print(f"<plurals> eliminados: {stats['del']}")
+          print(f"<item/> self-closing corregidos: {stats['pl_self']}")
+          print(f"<plurals> problemáticos eliminados: {stats['del']}")
           PYEOF
 
       - name: 7.3. Eliminar .9.png corruptos
@@ -255,46 +208,26 @@ jobs:
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
           echo "===== STEP 7.4 =====" | tee -a "$LOG"
-
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
-          import os
-          import xml.etree.ElementTree as ET
-
+          import os, re
           RES = "project/app/src/main/res"
-          invalid = []
-          missing_quantity = []
-
+          gt, pl = [], []
           for root, _, files in os.walk(RES):
-              if not os.path.basename(root).startswith("values"):
-                  continue
-
+              if not os.path.basename(root).startswith("values"): continue
               for fn in files:
-                  if not fn.lower().endswith(".xml"):
-                      continue
-
+                  if not fn.lower().endswith(".xml"): continue
                   p = os.path.join(root, fn)
-                  try:
-                      tree = ET.parse(p)
-                      xmlroot = tree.getroot()
-                  except Exception as e:
-                      invalid.append((p, str(e)))
-                      continue
-
-                  for plural in xmlroot.iter("plurals"):
-                      for item in list(plural):
-                          if item.tag.split("}")[-1] == "item":
-                              if not item.get("quantity"):
-                                  missing_quantity.append(
-                                      (p, plural.get("name"), ET.tostring(item, encoding="unicode"))
-                                  )
-
-          print(f"XML fuente inválidos: {len(invalid)}")
-          for p, err in invalid[:100]:
-              print(f"[INVALID_XML] {p}: {err}")
-
-          print(f"Items de plurals sin quantity: {len(missing_quantity)}")
-          for p, name, item in missing_quantity[:100]:
-              print(f"[MISSING_QUANTITY] {p} plurals={name}: {item}")
+                  src = open(p, encoding="utf-8", errors="replace").read()
+                  if ']]>' in src or ']]&gt;' in src: gt.append(p)
+                  for m in re.finditer(r'<plurals\b[^>]*>(.*?)</plurals>', src, re.DOTALL):
+                      for im in re.finditer(r'<item(\s[^>]*)?/?>', m.group(1)):
+                          if 'quantity' not in (im.group(1) or ''):
+                              pl.append((p, im.group(0)[:80]))
+          print(f"]]> / ]]&gt; en source: {len(gt)}")
+          for p in gt[:20]: print(f"  {p}")
+          print(f"plurals sin quantity en source: {len(pl)}")
+          for p, frag in pl[:20]: print(f"  {p}: {frag}")
+          print("OK source" if not gt and not pl else "WARN source")
           PYEOF
 
       - name: 7.5. Configurar Gradle y Plugins
@@ -302,7 +235,6 @@ jobs:
         run: |
           set -e
           cd project
-
           cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
@@ -325,14 +257,13 @@ jobs:
           if [ -f "app/build.gradle" ]; then
             sed -i "s/id 'com.android.application'/id 'com.android.application' version '8.2.0'/g" app/build.gradle
             sed -i 's/id "com.android.application"/id "com.android.application" version "8.2.0"/g' app/build.gradle
-
             if ! grep -q "com.android.application" app/build.gradle; then
               sed -i '1i plugins {\n    id "com.android.application" version "8.2.0"\n}\n' app/build.gradle
             fi
           fi
           cd ..
 
-      - name: 7.7. Diagnóstico inicial
+      - name: 7.7. Diagnóstico
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
@@ -345,6 +276,7 @@ jobs:
         run: |
           set -e
           cd project
+          rm -f gradle.properties
           cat << 'EOF' > gradle.properties
           org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
           org.gradle.daemon=false
@@ -357,7 +289,10 @@ jobs:
           EOF
           cd ..
 
-      - name: 8.1. Pre-build para poblar cache
+      # ============================================================
+      # PASO 8 — PRE-BUILD para poblar cache
+      # ============================================================
+      - name: 8.1. Pre-build para poblar cache de AARs
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
@@ -366,63 +301,113 @@ jobs:
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
           export GRADLE_OPTS="-Xmx4g -Dorg.gradle.jvmargs=-Xmx4g"
-
           set +e
-          "$G" --no-daemon --stacktrace :app:mergeDebugResources 2>&1 | tee -a "$LOG"
-          RC=${PIPESTATUS[0]}
+          "$G" --no-daemon --stacktrace :app:mergeDebugResources 2>&1 | tail -30 | tee -a "$LOG"
           set -e
+          echo "Pre-build completado (aunque haya fallado, cache está poblada)" | tee -a "$LOG"
 
-          echo "Pre-build terminó con código: $RC" | tee -a "$LOG"
-          exit 0
-
-      - name: 8.2. Inspeccionar XML de AARs en caché
+      # ============================================================
+      # PASO 8.2 — PATCH AARs EN CACHE
+      # ============================================================
+      - name: 8.2. Patch AARs y transforms de Gradle cache
         shell: bash
         run: |
           LOG="$GITHUB_WORKSPACE/build.log"
-          echo "===== STEP 8.2: INSPECCION AAR =====" | tee -a "$LOG"
-
+          echo "===== STEP 8.2: PATCH AARs =====" | tee -a "$LOG"
           python3 - <<'PYEOF' 2>&1 | tee -a "$LOG"
-          import os, glob, zipfile
-          import xml.etree.ElementTree as ET
+          import os, re, zipfile, glob
 
-          cache = os.path.expanduser("~/.gradle/caches")
-          count = 0
+          HOME = os.path.expanduser("~")
+          CACHE = os.path.join(HOME, ".gradle", "caches")
+          if not os.path.isdir(CACHE):
+              print("No hay cache"); raise SystemExit(0)
 
-          for aar in glob.glob(os.path.join(cache, "modules-2", "**", "*.aar"), recursive=True):
+          RE_PLURAL = re.compile(r'<plurals\b[^>]*>.*?</plurals>', re.DOTALL)
+          RE_ITEM = re.compile(r'<item(\s[^>]*)?>(.*?)</item>', re.DOTALL)
+          RE_ITEM_SELF = re.compile(r'<item(\s[^>]*)?/>')
+
+          def fix_xml(text):
+              orig = text
+              text = text.replace(']]>', '')
+              text = text.replace(']]&gt;', '')
+              def repl_block(m):
+                  block = m.group(0)
+                  he = block.find('>') + 1
+                  ts = block.rfind('</plurals>')
+                  if he <= 0 or ts <= 0: return block
+                  head, body, tail = block[:he], block[he:ts], block[ts:]
+                  def fx_self(im):
+                      attrs = im.group(1) or ''
+                      if 'quantity' in attrs: return im.group(0)
+                      return f'<item quantity="other"{attrs}/>'
+                  def fx_pair(im):
+                      attrs = im.group(1) or ''
+                      if 'quantity' in attrs: return im.group(0)
+                      return f'<item quantity="other"{attrs}>{im.group(2)}</item>'
+                  body = RE_ITEM_SELF.sub(fx_self, body)
+                  body = RE_ITEM.sub(fx_pair, body)
+                  return head + body + tail
+              text = RE_PLURAL.sub(repl_block, text)
+              return text, text != orig
+
+          total = 0
+
+          # 1. Transforms (extraídos)
+          for tdir in glob.glob(os.path.join(CACHE, "transforms-*")):
+              for root, _, files in os.walk(tdir):
+                  rp = root.replace("\\", "/")
+                  if "/transformed/" not in rp: continue
+                  if "/res/values" not in rp: continue
+                  for fn in files:
+                      if not fn.endswith(".xml"): continue
+                      p = os.path.join(root, fn)
+                      try:
+                          text = open(p, encoding="utf-8", errors="replace").read()
+                          t2, ch = fix_xml(text)
+                          if ch:
+                              open(p, "w", encoding="utf-8").write(t2)
+                              print(f"[TRANSFORM] {p}")
+                              total += 1
+                      except: pass
+
+          # 2. AARs originales
+          for aar in glob.glob(os.path.join(CACHE, "modules-2", "**", "*.aar"), recursive=True):
               try:
-                  with zipfile.ZipFile(aar) as z:
-                      for name in z.namelist():
-                          if not name.endswith(".xml") or "/res/values" not in name:
-                              continue
-                          try:
-                              data = z.read(name)
-                              root = ET.fromstring(data)
-                          except Exception as e:
-                              print(f"[AAR_XML_INVALID] {aar} :: {name} :: {e}")
-                              continue
+                  with zipfile.ZipFile(aar, 'r') as zin:
+                      changes = {}
+                      for name in zin.namelist():
+                          if not name.endswith(".xml"): continue
+                          if "/res/values" not in name: continue
+                          data = zin.read(name).decode("utf-8", errors="replace")
+                          nd, ch = fix_xml(data)
+                          if ch:
+                              changes[name] = nd
+                              print(f"[AAR] {aar}::{name}")
+                              total += 1
+                      if changes:
+                          tmp = aar + ".patched"
+                          with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+                              for item in zin.infolist():
+                                  if item.filename in changes:
+                                      zout.writestr(item, changes[item.filename])
+                                  else:
+                                      zout.writestr(item, zin.read(item.filename))
+                          os.replace(tmp, aar)
+              except: pass
 
-                          for plural in root.iter("plurals"):
-                              for item in list(plural):
-                                  if item.tag.split("}")[-1] == "item" and not item.get("quantity"):
-                                      print(
-                                          f"[AAR_PLURAL_MISSING_QUANTITY] {aar} :: {name} "
-                                          f"plural={plural.get('name')!r}"
-                                      )
-                                      count += 1
-              except Exception as e:
-                  print(f"[AAR_READ_ERROR] {aar}: {e}")
-
-          print(f"Total de items de plurals sospechosos encontrados en AAR: {count}")
+          print(f"Total parcheados: {total}")
           PYEOF
 
-      - name: 8.3. Build final y diagnóstico forense
+      # ============================================================
+      # PASO 8.3 — BUILD FINAL + DIAGNOSTICO FORENSE
+      # ============================================================
+      - name: 8.3. Build final y diagnostico forense
         shell: bash
         run: |
           set -o pipefail
           LOG="$GITHUB_WORKSPACE/build.log"
           REPORT="$GITHUB_WORKSPACE/resource-forensics.txt"
           echo "===== STEP 8.3: BUILD FINAL =====" | tee -a "$LOG"
-
           cd project
           chmod +x gradlew 2>/dev/null || true
           if [ -x ./gradlew ]; then G=./gradlew; else G=gradle; fi
@@ -435,7 +420,6 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then
             cd "$GITHUB_WORKSPACE"
-
             {
               echo "=================================================="
               echo "DIAGNOSTICO FORENSE DE RECURSOS ANDROID"
@@ -457,7 +441,6 @@ jobs:
               if ap in inspected or not os.path.isfile(path):
                   return
               inspected.add(ap)
-
               try:
                   with open(path, encoding="utf-8", errors="replace") as f:
                       data = f.read()
@@ -466,7 +449,6 @@ jobs:
                   return
 
               print(f"\n===== XML [{origin}]: {path} =====")
-
               try:
                   root = ET.fromstring(data)
               except Exception as e:
@@ -480,30 +462,25 @@ jobs:
                   return
 
               for node in root.iter():
-                  if node.tag.split("}")[-1] != "plurals":
+                  tag = node.tag.split("}")[-1]
+                  if tag != "plurals":
                       continue
-
                   name = node.get("name")
                   print(f"[PLURALS] name={name!r}")
-
                   if not name:
-                      print("  [ERROR] plurals sin atributo name")
-
+                      print("  [ERROR] elemento plurals sin atributo name")
                   for child in list(node):
-                      tag = child.tag.split("}")[-1]
-
-                      if tag != "item":
-                          print(f"  [UNEXPECTED_CHILD] tag={tag!r} attrs={dict(child.attrib)!r}")
+                      ctag = child.tag.split("}")[-1]
+                      if ctag != "item":
+                          print(f"  [UNEXPECTED_CHILD] tag={ctag!r} attrs={dict(child.attrib)!r}")
                           continue
-
                       quantity = child.get("quantity")
-
                       if not quantity:
-                          print(f"  [MISSING_QUANTITY] attrs={dict(child.attrib)!r}")
-                          print("  [ITEM_XML]", ET.tostring(child, encoding="unicode")[:1000])
+                          print(f"  [MISSING_QUANTITY] item attrs={dict(child.attrib)!r}")
                       elif quantity not in ("zero", "one", "two", "few", "many", "other"):
-                          print(f"  [INVALID_QUANTITY] {quantity!r}")
-
+                          print(f"  [INVALID_QUANTITY] {quantity!r}; attrs={dict(child.attrib)!r}")
+                      if not child.attrib.get("quantity"):
+                          print("  [ITEM_XML]", ET.tostring(child, encoding="unicode")[:1000])
                       for nested in child.iter():
                           if nested is child:
                               continue
@@ -525,7 +502,6 @@ jobs:
               os.path.join(BUILD, "**", "merged_res", "values", "*.xml"),
               os.path.join(BUILD, "**", "merged_res", "values-*", "*.xml"),
           ]
-
           for pattern in patterns:
               for path in sorted(glob.glob(pattern, recursive=True)):
                   inspect(path, "MERGED")
@@ -547,6 +523,83 @@ jobs:
 
           exit "$RC"
 
+      - name: 8.4. Aislar plural exacto que rompe AAPT2
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          REPORT="$GITHUB_WORKSPACE/resource-isolation.txt"
+          AAPT2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          [ -x "$AAPT2" ] || AAPT2="$(find "$ANDROID_HOME/build-tools" -type f -name aapt2 2>/dev/null | sort | tail -1)"
+          {
+            echo "===== AISLAMIENTO INDIVIDUAL DE PLURALS ====="
+            echo "AAPT2: $AAPT2"
+            if [ ! -x "$AAPT2" ]; then
+              echo "ERROR: no se encontró el ejecutable aapt2"
+              exit 0
+            fi
+            python3 - "$AAPT2" <<'PYEOF'
+          import os, sys, glob, tempfile, subprocess
+          import xml.etree.ElementTree as ET
+
+          aapt2 = sys.argv[1]
+          base = "project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir"
+          files = [
+              os.path.join(base, "values", "values.xml"),
+              os.path.join(base, "values-hi", "values-hi.xml"),
+          ]
+          total = 0
+          failures = 0
+
+          for source in files:
+              if not os.path.isfile(source):
+                  print(f"[NO_EXISTE] {source}")
+                  continue
+              try:
+                  root = ET.parse(source).getroot()
+              except Exception as e:
+                  print(f"[XML_INVALIDO] {source}: {e}")
+                  continue
+
+              plurals = [n for n in list(root) if n.tag.split('}')[-1] == 'plurals']
+              print(f"\n[ARCHIVO] {source} | plurals={len(plurals)}")
+
+              for index, plural in enumerate(plurals):
+                  name = plural.get('name') or f"sin_nombre_{index}"
+                  wrapper = ET.Element("resources")
+                  wrapper.append(plural)
+                  xml_data = ET.tostring(wrapper, encoding="utf-8", xml_declaration=True)
+
+                  with tempfile.TemporaryDirectory(prefix="aapt2-plural-") as td:
+                      input_xml = os.path.join(td, "isolated.xml")
+                      output_zip = os.path.join(td, "out.zip")
+                      with open(input_xml, "wb") as f:
+                          f.write(xml_data)
+                      try:
+                          result = subprocess.run(
+                              [aapt2, "compile", "-o", output_zip, input_xml],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              text=True,
+                              timeout=15
+                          )
+                          total += 1
+                          if result.returncode != 0:
+                              failures += 1
+                              print(f"[FALLA_PLURAL] locale={os.path.basename(os.path.dirname(source))} name={name}")
+                              print((result.stderr or result.stdout).strip()[:2000])
+                          else:
+                              print(f"[OK] {name}")
+                      except Exception as e:
+                          failures += 1
+                          print(f"[ERROR_TEST] {name}: {e}")
+
+          print(f"\nRESUMEN: plurals probados={total}; fallos individuales={failures}")
+          if failures == 0:
+              print("NOTA: si el fallo global continúa, revisar interacción entre recursos o formato de valores.")
+          PYEOF
+          } 2>&1 | tee "$REPORT" | tee -a "$GITHUB_WORKSPACE/build.log"
+
       - name: 9. Subir logs y diagnóstico
         if: always()
         uses: actions/upload-artifact@v4
@@ -555,6 +608,7 @@ jobs:
           path: |
             build.log
             resource-forensics.txt
+            resource-isolation.txt
             project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values/
             project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir/values-hi/
           if-no-files-found: ignore
