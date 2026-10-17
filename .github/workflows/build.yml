@@ -198,7 +198,7 @@ jobs:
                       head, body, tail = item[:open_end], item[open_end:close_start], item[close_start:]
                       body = re.sub(
                           r'[^<>]+',
-                          lambda t: re.sub(r"(?<!\\)'", r"\'", t.group(0)),
+                          lambda t: re.sub(r"(?<!\\)'", lambda apostrophe: "\\'", t.group(0)),
                           body
                       )
                       return head + body + tail
