@@ -186,6 +186,32 @@ jobs:
                       return head + body + tail
                   src = RE_PLURAL_BLOCK.sub(repl_block, src)
 
+                  # 4) Escapar apóstrofos sin escape dentro del texto de cada item
+                  # de plurals. Android exige \' en cadenas; no modificar atributos
+                  # XML ni apóstrofos que ya estén escapados.
+                  def escape_plural_item(m):
+                      item = m.group(0)
+                      open_end = item.find('>') + 1
+                      close_start = item.rfind('</item>')
+                      if open_end <= 0 or close_start < open_end:
+                          return item
+                      head, body, tail = item[:open_end], item[open_end:close_start], item[close_start:]
+                      body = re.sub(
+                          r'[^<>]+',
+                          lambda t: re.sub(r"(?<!\\)'", r"\'", t.group(0)),
+                          body
+                      )
+                      return head + body + tail
+
+                  def escape_plural_block(m):
+                      return RE_ITEM.sub(escape_plural_item, m.group(0))
+
+                  before_apostrophes = src
+                  src = RE_PLURAL_BLOCK.sub(escape_plural_block, src)
+                  if src != before_apostrophes:
+                      stats.setdefault('apostrophes', 0)
+                      stats['apostrophes'] += src.count("\\'") - before_apostrophes.count("\\'")
+
                   if src != orig:
                       open(p, "w", encoding="utf-8").write(src)
 
@@ -193,6 +219,7 @@ jobs:
           print(f"<item>...</item> corregidos: {stats['pl_pair']}")
           print(f"<item/> self-closing corregidos: {stats['pl_self']}")
           print(f"<plurals> problemáticos eliminados: {stats['del']}")
+          print(f"Apóstrofos escapados en plurals: {stats.get('apostrophes', 0)}")
           PYEOF
 
       - name: 7.3. Eliminar .9.png corruptos
