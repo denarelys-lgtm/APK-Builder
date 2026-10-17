@@ -523,82 +523,104 @@ jobs:
 
           exit "$RC"
 
-      - name: 8.4. Aislar plural exacto que rompe AAPT2
+      - name: 8.4. Aislar plurals con configuración Android válida
         if: always()
         shell: bash
         run: |
           set +e
           REPORT="$GITHUB_WORKSPACE/resource-isolation.txt"
           AAPT2="$ANDROID_HOME/build-tools/34.0.0/aapt2"
-          [ -x "$AAPT2" ] || AAPT2="$(find "$ANDROID_HOME/build-tools" -type f -name aapt2 2>/dev/null | sort | tail -1)"
+          if [ ! -x "$AAPT2" ]; then
+            AAPT2="$(find "$ANDROID_HOME/build-tools" -type f -name aapt2 2>/dev/null | sort | tail -1)"
+          fi
+
           {
             echo "===== AISLAMIENTO INDIVIDUAL DE PLURALS ====="
             echo "AAPT2: $AAPT2"
             if [ ! -x "$AAPT2" ]; then
-              echo "ERROR: no se encontró el ejecutable aapt2"
+              echo "ERROR: no se encontró AAPT2"
               exit 0
             fi
+
             python3 - "$AAPT2" <<'PYEOF'
-          import os, sys, glob, tempfile, subprocess
+          import os
+          import sys
+          import tempfile
+          import subprocess
           import xml.etree.ElementTree as ET
 
           aapt2 = sys.argv[1]
-          base = "project/app/build/intermediates/incremental/debug/mergeDebugResources/merged.dir"
-          files = [
+          base = (
+              "project/app/build/intermediates/incremental/"
+              "debug/mergeDebugResources/merged.dir"
+          )
+          sources = [
               os.path.join(base, "values", "values.xml"),
               os.path.join(base, "values-hi", "values-hi.xml"),
           ]
-          total = 0
-          failures = 0
+          total = failures = inconclusive = 0
 
-          for source in files:
+          for source in sources:
               if not os.path.isfile(source):
                   print(f"[NO_EXISTE] {source}")
                   continue
               try:
                   root = ET.parse(source).getroot()
-              except Exception as e:
-                  print(f"[XML_INVALIDO] {source}: {e}")
+              except Exception as exc:
+                  print(f"[XML_INVALIDO] {source}: {exc}")
                   continue
 
-              plurals = [n for n in list(root) if n.tag.split('}')[-1] == 'plurals']
+              plurals = [n for n in list(root) if n.tag.split("}")[-1] == "plurals"]
               print(f"\n[ARCHIVO] {source} | plurals={len(plurals)}")
 
-              for index, plural in enumerate(plurals):
-                  name = plural.get('name') or f"sin_nombre_{index}"
-                  wrapper = ET.Element("resources")
-                  wrapper.append(plural)
-                  xml_data = ET.tostring(wrapper, encoding="utf-8", xml_declaration=True)
-
-                  with tempfile.TemporaryDirectory(prefix="aapt2-plural-") as td:
-                      input_xml = os.path.join(td, "isolated.xml")
-                      output_zip = os.path.join(td, "out.zip")
-                      with open(input_xml, "wb") as f:
-                          f.write(xml_data)
+              for index, plural in enumerate(plurals, 1):
+                  name = plural.get("name", f"sin_nombre_{index}")
+                  total += 1
+                  with tempfile.TemporaryDirectory(prefix="aapt2-isolation-") as td:
+                      # Android identifica la configuración mediante el directorio values.
+                      values_dir = os.path.join(td, "res", "values")
+                      os.makedirs(values_dir, exist_ok=True)
+                      input_xml = os.path.join(values_dir, "isolated.xml")
+                      output_zip = os.path.join(td, "compiled.zip")
+                      wrapper = ET.Element("resources")
+                      wrapper.append(plural)
+                      ET.ElementTree(wrapper).write(
+                          input_xml, encoding="utf-8", xml_declaration=True
+                      )
                       try:
                           result = subprocess.run(
                               [aapt2, "compile", "-o", output_zip, input_xml],
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE,
                               text=True,
-                              timeout=15
+                              timeout=20,
                           )
-                          total += 1
-                          if result.returncode != 0:
-                              failures += 1
-                              print(f"[FALLA_PLURAL] locale={os.path.basename(os.path.dirname(source))} name={name}")
-                              print((result.stderr or result.stdout).strip()[:2000])
-                          else:
+                          details = (result.stderr or result.stdout).strip()
+                          if result.returncode == 0:
                               print(f"[OK] {name}")
-                      except Exception as e:
-                          failures += 1
-                          print(f"[ERROR_TEST] {name}: {e}")
+                          elif "invalid configuration" in details.lower():
+                              inconclusive += 1
+                              print(f"[INCONCLUSO] {name}: configuración inválida")
+                              print(details[:1200])
+                          else:
+                              failures += 1
+                              print(f"[FALLA_REAL] {name}")
+                              print(details[:2000])
+                      except subprocess.TimeoutExpired:
+                          inconclusive += 1
+                          print(f"[TIMEOUT] {name}")
+                      except Exception as exc:
+                          inconclusive += 1
+                          print(f"[ERROR_DIAGNOSTICO] {name}: {exc}")
 
-          print(f"\nRESUMEN: plurals probados={total}; fallos individuales={failures}")
-          if failures == 0:
-              print("NOTA: si el fallo global continúa, revisar interacción entre recursos o formato de valores.")
+          print("\n===== RESUMEN =====")
+          print(f"Plurals examinados: {total}")
+          print(f"Fallos individuales: {failures}")
+          print(f"Inconclusos: {inconclusive}")
+          print("Una compilación individual correcta no garantiza que el merge completo funcione.")
           PYEOF
-          } 2>&1 | tee "$REPORT" | tee -a "$GITHUB_WORKSPACE/build.log"
+          } 2>&1 | tee "$REPORT"
+          echo "Informe guardado en: $REPORT"
 
       - name: 9. Subir logs y diagnóstico
         if: always()
